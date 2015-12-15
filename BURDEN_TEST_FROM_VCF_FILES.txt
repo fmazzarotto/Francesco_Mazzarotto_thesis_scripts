@@ -1,0 +1,1525 @@
+###Inputs needed: file path of cases VCF, file path of controls VCF, file path of cases base-by-base depth file, file path of
+###controls base-by-base file, path of directory where to save ExAC VCF sections, path of directory where to save 1KG vcf sections,
+###path of directory containing ESP VCF files (as they are not accessible via ftp), path of directory containing ESP coverage files,
+###path of directory containing snpEff. The script requires EnsemblVEP, tabix and vcflib to be installed, besides R packages "biomaRt",
+###"HardyWeinberg". If base-by-base read depth files are not provided, just enter random strings in place of the file paths, and
+###then select "N" when the script asks about the Mann-Whitney U test.
+
+
+vcf_burden_test <- function(fullfilepath_cases,fullfilepath_controls,fullfilepath_cov_cases,fullfilepath_cov_controls,Exac_vcf_dir="~/Desktop/Research/CH.2_Burden_DCM_HCM/Exac files/",OneKG_vcf_dir="~/Desktop/Research/CH.2_Burden_DCM_HCM/1KG files/",ESP_vcf_dir="~/Desktop/Research/CH.2_Burden_DCM_HCM/ESP variants/ESP vcf/",ESP_cov_dir="~/Desktop/Research/CH.2_Burden_DCM_HCM/ESP variants/ESP cov/",snpEff_dir="~/snpEff/"){
+
+	vcf1kg = c()
+	ESPvcf = c()
+	ESPcov = c()
+	EXACvcf = c()
+	gene_info = c()
+
+	library("biomaRt")
+	library("HardyWeinberg")
+	ensmart = useMart("ENSEMBL_MART_ENSEMBL",host="grch37.ensembl.org", path="/biomart/martservice", dataset="hsapiens_gene_ensembl")
+	casecontrol = 0
+
+	multibreak = readline("Do you want to separate multi-allelic sites in the VCF files? [y/n] [needed for accurate results if the files contain multi-allelic variants]\n")	
+	if(multibreak == "y"){
+		cat("Dealing with multi-allelic sites in VCF files (separating alleles in multiple lines)...\n")
+		system(paste("vcfbreakmulti ",fullfilepath_cases," > ",fullfilepath_cases,"_noMultiAll.vcf",sep=""))
+		system(paste("vcfbreakmulti ",fullfilepath_controls," > ",fullfilepath_controls,"_noMultiAll.vcf",sep=""))
+		fullfilepath_cases = paste(fullfilepath_cases,"_noMultiAll.vcf",sep="")
+		fullfilepath_controls = paste(fullfilepath_controls,"_noMultiAll.vcf",sep="")
+		}
+	else if(multibreak == "n"){
+			}
+	else{
+		stop("The selection must be either y or n")
+		}
+
+	genes = readline("Choose the gene(s) on which to perform QC (insert in the form x,y,...,z...later will ask for target for burden testing):")
+	genes = unlist(strsplit(genes,","))
+
+	refcohort = readline("Do you want to use ExAC or ESP+1KG as reference population for QC and burden test? [Enter 1 for ExAC, 2 for ESP+1KG]\n")
+	if(refcohort == 1){
+		refcoh_flag = "Exac"
+		}
+	else if(refcohort == 2){
+		refcoh_flag = "ESP+1KG"
+		}
+	else{
+		stop("The selection must be 1 or 2")
+		}
+
+	minvardp = readline("Do you want to discard variants called below a certain read depth? If yes enter MIN read depth to accept a variant, if no enter N or n\n")
+	if(minvardp != "n" & minvardp !="N"){
+		minvardp = as.numeric(minvardp)
+		}
+	
+	testvardp = readline("Enter the mean cohort read depth under which to test a variant for comparability (Mann-Whitney U test) across the two cohorts (enter 'N' or 'n' for no test):\n")
+	if(testvardp != "n" & testvardp !="N"){
+		testvardp = as.numeric(testvardp)
+		}
+
+	annottool = readline("Do you want to use SnpEff or EnsemblVEP to annotate variants? [Enter 1 for SnpEff, 2 for EnsemblVEP]\n")
+	
+	cat("Importing base-by-base read depth tables for cases and controls (this will take a while...)\n\n")	
+	covcases = read.table(fullfilepath_cov_cases,header=T)
+	covcontrols = read.table(fullfilepath_cov_controls,header=T)
+	covcases[,1] = as.character(covcases[,1])
+	covcases[,2] = as.character(covcases[,2])
+	covcontrols[,1] = as.character(covcontrols[,1])
+	covcontrols[,2] = as.character(covcontrols[,2])
+
+	for(g in genes){
+		cat(paste("Importing ",g," data from 1000Genomes, ESP and ExAC...\n",sep=""))					
+		gene_cohord = getBM(c("chromosome_name","start_position","end_position"),"hgnc_symbol",g,ensmart)
+
+		if(dim(gene_cohord)[1]>1){
+			gene_cohord = gene_cohord[-c(c(which(grepl("PATCH",gene_cohord[,"chromosome_name"])),which(grepl("LRG",gene_cohord[,"chromosome_name"])),which(grepl("MHC",gene_cohord[,"chromosome_name"])),which(grepl("CTG",gene_cohord[,"chromosome_name"])))),]
+			if(dim(gene_cohord)[1]>1){
+				stop("Multiple annotations are present for this gene!")
+				}
+			chromosome = as.character(gene_cohord[1,"chromosome_name"])
+			}
+		else{
+			chromosome = as.character(gene_cohord[1,"chromosome_name"])
+			}			
+
+		if(! paste(g,".vcf",sep="") %in% list.files(OneKG_vcf_dir)){
+			system(paste("tabix -h ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/ALL.chr",as.character(chromosome),".phase1_release_v3.20101123.snps_indels_svs.genotypes.vcf.gz ",chromosome,":",as.character(gene_cohord[1,"start_position"]-200),"-",as.character(gene_cohord[1,"end_position"]+200)," > ","'",OneKG_vcf_dir,g,".vcf","'",sep=""))
+#			system(paste("tabix -h ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/ALL.chr",as.character(chromosome),".phase3_shapeit2_mvncall_integrated_v2.20130502.genotypes.vcf.gz ",chromosome,":",as.character(gene_cohord[1,"start_position"]-200),"-",as.character(gene_cohord[1,"end_position"]+200)," > ","'",OneKG_vcf_dir,g,".vcf","'",sep=""))
+			}
+
+			#IF A NON-EXISTING GENE IS AMONG THE GENES TO BE ANALYZED, THE PROGRAM STOPS AND TELL WHICH GENE HAS NOT BEEN FOUND BY BIOMART (FILE WITH NO LINES)
+		new_vcf_1kg = try(read.table(paste(OneKG_vcf_dir,g,".vcf",sep=""),header=F,colClasses=c("character"))[,c(1,2,4,5,8)],silent=T)
+		if(is(new_vcf_1kg,"try-error")){
+			stop(paste("The gene ",g," does not exist!!!",sep=""))
+			}
+		vcf1kg = rbind(vcf1kg,new_vcf_1kg)
+					
+			
+		if(! paste(g,".vcf",sep="") %in% list.files(ESP_vcf_dir)){
+			path_vcf = paste(ESP_vcf_dir,"ESP6500SI-V2-SSA137.updatedProteinHgvs.chr",chromosome,".snps_indels.vcf",sep="")
+			system(paste("bgzip ","'",path_vcf,"'",sep=""))
+			system(paste("tabix -p vcf ","'",path_vcf,".gz","'",sep=""))
+			system(paste("tabix -h ","'",path_vcf,".gz","' ",chromosome,":",as.character(gene_cohord[1,"start_position"]-200),"-",as.character(gene_cohord[1,"end_position"]+200)," > ","'",ESP_vcf_dir,g,".vcf","'",sep=""))
+			system(paste("bgzip -d ","'",path_vcf,".gz","'",sep=""))
+			}
+					
+		new_vcf_esp = read.table(paste(ESP_vcf_dir,g,".vcf",sep=""),header=F,colClasses=c("character"))
+		new_vcf_esp = new_vcf_esp[,c(1,2,4,5,8)]
+		ESPvcf = rbind(ESPvcf,new_vcf_esp)
+			
+		path_cov = paste(ESP_cov_dir,"ESP6500SI-V2.chr",chromosome,".coverage.seq_blocks.txt",sep="")
+		cov_file = read.table(path_cov,colClasses=c("character"))
+		cov_file = cov_file[,-c(4:10)]
+		cov_file = subset(cov_file,(cov_file[,2]>(gene_cohord[1,"start_position"]-200) & cov_file[,3]<(gene_cohord[1,"end_position"]+200)))
+		ESPcov = rbind(ESPcov,cov_file)
+
+		if(! paste(g,".vcf",sep="") %in% list.files(Exac_vcf_dir)){
+			system(paste("tabix -h ftp://ftp.broadinstitute.org/pub/ExAC_release/release0.3/ExAC.r0.3.sites.vep.vcf.gz ",chromosome,":",as.character(gene_cohord[1,"start_position"]-200),"-",as.character(gene_cohord[1,"end_position"]+200)," > ","'",Exac_vcf_dir,g,".vcf","'",sep=""))
+			}
+
+		new_vcf_exac = read.table(paste(Exac_vcf_dir,g,".vcf",sep=""),header=F,colClasses=c("character"))
+		new_vcf_exac = new_vcf_exac[,c(1,2,4,5,8)]
+		EXACvcf = rbind(EXACvcf,new_vcf_exac)
+
+		geneinfo_row = c(g,gene_cohord)
+		gene_info = rbind(gene_info,geneinfo_row)
+		}
+
+	cat("WILL NOW PERFORM QC ON ALL CODING VARIANTS....\n\n")
+
+	rownames(gene_info) = 1:dim(gene_info)[1]
+	colnames(gene_info) = c("GENE","CHROM","START","END")
+	gene_info[,"CHROM"] = sapply(gene_info[,"CHROM"], function(gg) paste("chr",gg,sep=""))
+
+	genes_snpeffstring = ""
+	for(k in 1:dim(gene_info)[1]){
+		genes_snpeffstring = paste(genes_snpeffstring,paste("|((CHROM='",gene_info[k,2],"')&(POS>=",gene_info[k,3],")&(POS<=",gene_info[k,4],"))",sep=""),sep="")
+		}
+	genes_snpeffstring = substring(genes_snpeffstring,2)
+
+	while(casecontrol %in% 0:1){
+
+		var_1KG_freq = c()
+		var_1KG_freq_cauc = c()
+		var_1KG_allcount = c()
+		var_1KG_allcount_cauc = c()
+		var_ESP_freq = c()
+		var_ESP_freq_cauc = c()
+		var_ESP_allcount = c()
+		var_ESP_allno = c()
+		var_ESP_allcount_cauc = c()
+		var_ESP_allno_cauc = c()
+		var_EXAC_freq = c()
+		var_EXAC_allcount = c()
+		var_EXAC_allno = c()
+		complex_indels = c()
+		diff_ref_allele_1kg = c()
+		diff_ref_allele_esp = c()
+		covered_in_ESP = c()
+		ALL_COUNT = c()
+		ALL_NO = c()
+		GENE = c()
+		NO_CALLS = c()
+		HET_SAMPLES = c()
+		HOM_SAMPLES = c()
+
+		if(casecontrol == 0){
+
+			if(annottool == 1){
+				cat("Selecting variants with QUAL>20 and FILTER=PASS from cases VCF file...\n\n")
+				system(paste("cat ",fullfilepath_cases," | java -jar ",snpEff_dir,"SnpSift.jar filter \"(FILTER='PASS')&(QUAL>=20)&",genes_snpeffstring,"\" > temp_vcf_cases.vcf",sep=""))
+				cat("Annotating cases coding variants with SnpEff...\n\n")
+				system(paste("cat temp_vcf_cases.vcf | java -Xmx8g -jar ",snpEff_dir,"snpEff.jar -c ",snpEff_dir,"snpEff.config -q -noNextProt -no-downstream -no-intergenic -no-intron -no-upstream -no-utr -no INTRAGENIC -chr chr -onlyProtein GRCh37.75 | java -jar ",snpEff_dir,"/SnpSift.jar filter \"(exists EFF[*].EFFECT)\" > temp_vcf_cases3.vcf",sep=""))
+				}
+			else{
+				cat("Selecting variants with QUAL>20 and FILTER=PASS from cases VCF file...\n\n")
+				system(paste("cat ",fullfilepath_cases," | java -jar ",snpEff_dir,"SnpSift.jar filter \"(FILTER='PASS')&(QUAL>=20)&",genes_snpeffstring,"\" > temp_vcf_cases.vcf",sep=""))
+				cat("Annotating cases coding variants with EnsEMBL_VEP...\n\n")
+				system("variant_effect_predictor.pl --quiet --no_stats --force_overwrite -sift p -polyphen p --protein --symbol --vcf --no_intergenic --pick --cache --assembly GRCh37 --fork 4 --port 3337 -i temp_vcf_cases.vcf -o temp_vcf_cases2.vcf")
+				system("sed -i 's/variant&intron_variant/variant/g' temp_vcf_cases2.vcf")
+				system("filter_vep.pl --force_overwrite -i temp_vcf_cases2.vcf -o temp_vcf_cases3.vcf -format vcf -filter \"Consequence\"")
+				system("filter_vep.pl --force_overwrite -i temp_vcf_cases2.vcf -o temp_vcf_cases3.vcf -format vcf -filter \"not Consequence match UTR\"")
+				system("filter_vep.pl --force_overwrite -i temp_vcf_cases2.vcf -o temp_vcf_cases3.vcf -format vcf -filter \"not Consequence match intron\"")
+				}
+			
+			vcf = read.table("temp_vcf_cases3.vcf",header=F,colClasses=c("character"))
+
+			newcolnames = unlist(strsplit(gsub("#","",system(paste("awk '/#CHROM/' ",gsub(" ","\\\\ ",'temp_vcf_cases3.vcf'),collapse=""),intern=T)),"\t"))
+#			newcolnames[680] = "BO_10002838"		##line only for TTNnt replication
+#			newcolnames[1356] = "L_11AK00010"		##line only for TTNnt replication
+#			newcolnames = newcolnames[-c(681,1357)]		##line only for TTNnt replication
+			colnames(vcf) = newcolnames
+
+			vcf_cases_orig = vcf
+			no_cases = dim(vcf)[2]-9
+			system("rm temp_vcf_cases.vcf temp_vcf_cases2.vcf snpEff_summary* snpEff_genes*")
+			}
+		else{
+			
+			if(annottool == 1){
+				cat("Selecting variants with QUAL>20 and FILTER=PASS from controls VCF file...\n\n")
+				system(paste("cat ",fullfilepath_controls," | java -jar ",snpEff_dir,"SnpSift.jar filter \"(FILTER='PASS')&(QUAL>=20)&",genes_snpeffstring,"\" > temp_vcf_controls.vcf",sep=""))
+				cat("Annotating controls coding variants with SnpEff...\n\n")
+				system(paste("cat temp_vcf_controls.vcf | java -Xmx8g -jar ",snpEff_dir,"snpEff.jar -c ",snpEff_dir,"snpEff.config -q -noNextProt -no-downstream -no-intergenic -no-intron -no-upstream -no-utr -no INTRAGENIC -chr chr -onlyProtein GRCh37.75 | java -jar ",snpEff_dir,"/SnpSift.jar filter \"(exists EFF[*].EFFECT)\" > temp_vcf_controls3.vcf",sep=""))
+#				system(paste("cat temp_vcf_controls.vcf | java -Xmx8g -jar ",snpEff_dir,"snpEff.jar -c ",snpEff_dir,"snpEff.config -q -noNextProt -no-downstream -no-intergenic -no-upstream -chr chr -onlyProtein GRCh37.75 | java -jar ",snpEff_dir,"/SnpSift.jar filter \"(exists EFF[*].EFFECT)\" > temp_vcf_controls3.vcf",sep=""))
+				}
+			else{
+				cat("Selecting variants with QUAL>20 and FILTER=PASS from controls VCF file...\n\n")
+				system(paste("cat ",fullfilepath_controls," | java -jar ",snpEff_dir,"SnpSift.jar filter \"(FILTER='PASS')&(QUAL>=20)&",genes_snpeffstring,"\" > temp_vcf_controls.vcf",sep=""))
+				cat("Annotating controls coding variants with EnsEMBL_VEP...\n\n")
+				system("variant_effect_predictor.pl --quiet --no_stats --force_overwrite -sift p -polyphen p --protein --symbol --vcf --no_intergenic --pick --cache --assembly GRCh37 --fork 4 --port 3337 -i temp_vcf_controls.vcf -o temp_vcf_controls2.vcf")
+#				system("filter_vep.pl --force_overwrite -i temp_vcf_controls2.vcf -o temp_vcf_controls3.vcf -format vcf -filter \"Consequence match SYNONYMOUS or Consequence match SPLICE or IMPACT is MODERATE or IMPACT is HIGH\"")
+				system("sed -i 's/variant&intron_variant/variant/g' temp_vcf_controls2.vcf")
+				system("filter_vep.pl --force_overwrite -i temp_vcf_controls2.vcf -o temp_vcf_controls3.vcf -format vcf -filter \"Consequence\"")
+				system("filter_vep.pl --force_overwrite -i temp_vcf_controls2.vcf -o temp_vcf_controls3.vcf -format vcf -filter \"not Consequence match UTR\"")
+				system("filter_vep.pl --force_overwrite -i temp_vcf_controls2.vcf -o temp_vcf_controls3.vcf -format vcf -filter \"not Consequence match intron\"")
+				}
+
+			vcf = read.table("temp_vcf_controls3.vcf",header=F,colClasses=c("character"))
+			colnames(vcf) = unlist(strsplit(gsub("#","",system(paste("awk '/#CHROM/' ",gsub(" ","\\\\ ",'temp_vcf_controls3.vcf'),collapse=""),intern=T)),"\t"))
+			vcf_controls_orig = vcf
+			no_controls = dim(vcf)[2]-9
+			system("rm temp_vcf_controls.vcf temp_vcf_controls2.vcf snpEff_summary* snpEff_genes*")
+			}
+		
+		colnames(vcf1kg)=c("CHROM","POS","REF","ALT","INFO")
+		colnames(ESPvcf)=c("CHROM","POS","REF","ALT","INFO")
+		colnames(ESPcov)=c("CHROM","START","END")
+		colnames(EXACvcf)=c("CHROM","POS","REF","ALT","INFO")
+		colnames(ESPcov)=c("CHROM","START","END")
+	
+		vcf = vcf[!as.logical(grepl(",", vcf[,"ALT"])),]
+	
+		if(casecontrol == 0){
+			colnames(covcases)[which(substr(colnames(covcases),1,1)=="X")] = substr(subset(colnames(covcases),substr(colnames(covcases),1,1)=="X"),2,200)
+			colstokeep = colnames(covcases) %in% colnames(vcf)
+			covcases = covcases[,as.logical(colstokeep)]
+			}
+		else{
+			colnames(covcontrols)[which(substr(colnames(covcontrols),1,1)=="X")] = substr(subset(colnames(covcontrols),substr(colnames(covcontrols),1,1)=="X"),2,200)
+			colstokeep = colnames(covcontrols) %in% colnames(vcf)
+			covcontrols = covcontrols[,as.logical(colstokeep)]
+			}
+
+		if(casecontrol == 0){
+			cat(paste("Will now QC and annotate ",dim(vcf)[1]," variants in ",no_cases," cases....\n\n",sep=""))
+			}
+		else{
+			cat(paste("Will now QC and annotate ",dim(vcf)[1]," variants in ",no_controls," controls....\n\n",sep=""))
+			}
+
+		if(is.numeric(minvardp) | is.numeric(testvardp)){
+			if(casecontrol == 0){
+				cat("Computing read depth stats in cases...this might take a while (approx 15 sec per 1000 variants per 100 samples)...\n\n")
+				}
+			else{
+				cat("Computing read depth stats in controls...this might take a while (approx 15 sec per 1000 variants per 100 samples)...\n\n")
+				}		
+
+			rdtable = suppressWarnings(sapply(10:dim(vcf)[2], function(c) sapply(1:dim(vcf)[1], function(r) as.numeric(unlist(strsplit(as.character(vcf[r,c]),":"))[3]))))
+			if(length(which(is.na(rdtable)))>0){
+				cat("Replacing NA values in coverage table...\n")
+				rdtable[is.na(rdtable)] = suppressWarnings(sapply(1:dim(which(is.na(rdtable),arr.ind=T))[1], function(x) (as.numeric(unlist(strsplit(unlist(strsplit(as.character(vcf[which(is.na(rdtable),arr.ind=T)[x,1],which(is.na(rdtable),arr.ind=T)[x,2]]),":"))[2],","))[1])+as.numeric(unlist(strsplit(unlist(strsplit(as.character(vcf[which(is.na(rdtable),arr.ind=T)[x,1],which(is.na(rdtable),arr.ind=T)[x,2]]),":"))[2],","))[2]))))
+				}
+			MEAN_READ_DEPTH = apply(rdtable,1,mean,na.rm=T)
+			}
+		
+		for(x in 1:dim(vcf)[1]){
+
+#REMOVE ANY VARIANT WITH READ DEPTH < 10X
+			if(is.numeric(minvardp)){
+				vcf[x,(which(rdtable[x,]<minvardp)+9)] = "./."
+				}
+
+				if(x == 1){
+					cat("Retrieving variant frequencies...")
+					}
+				else if(x == round(dim(vcf)[1]*0.10)){
+					cat("10%")
+					}
+				else if(x == round(dim(vcf)[1]*0.2)){
+					cat("---20%")
+					}
+				else if(x == round(dim(vcf)[1]*0.3)){
+					cat("---30%")
+					}
+				else if(x == round(dim(vcf)[1]*0.4)){
+					cat("---40%")
+					}
+				else if(x == round(dim(vcf)[1]*0.5)){
+					cat("---50%")
+					}
+				else if(x == round(dim(vcf)[1]*0.6)){
+					cat("---60%")
+					}
+				else if(x == round(dim(vcf)[1]*0.70)){
+					cat("---70%")
+					}
+				else if(x == round(dim(vcf)[1]*0.80)){
+					cat("---80%")
+					}
+				else if(x == round(dim(vcf)[1]*0.90)){
+					cat("---90%")
+					}
+				else if(x == round(dim(vcf)[1]*1)){
+					cat("---100%\n")
+					}
+	
+			NO_CALLS = c(NO_CALLS,sum(sapply(vcf[x,10:dim(vcf)[2]],function(s) substr(s,1,3)=="./.")))
+			ALL_NO = c(ALL_NO,(sum(sapply(vcf[x,10:dim(vcf)[2]],function(n) substr(n,1,3)!="./."))*2))
+
+
+			hets = sum(sapply(vcf[x,10:dim(vcf)[2]], function(v) substr(as.character(v),1,3) == "0/1"))
+			homs = sum(sapply(vcf[x,10:dim(vcf)[2]], function(v) substr(as.character(v),1,3) == "1/1"))
+			ALL_COUNT = c(ALL_COUNT, sum(hets) + (sum(homs)*2))
+			HET_SAMPLES = c(HET_SAMPLES,hets)
+			HOM_SAMPLES = c(HOM_SAMPLES,homs)
+
+
+			#IF IT IS A SNP
+			if(nchar(as.character(vcf[x,"REF"]))==1 & nchar(as.character(vcf[x,"ALT"]))==1){
+			
+#####SNP - 1000 GENOMES#####
+			
+				if(length(which(vcf1kg[,"POS"]==vcf[x,"POS"]))==0 | length(which(vcf1kg[,"POS"]==vcf[x,"POS"] & vcf1kg[,"CHROM"]==substr(vcf[x,"CHROM"],4,6)))==0){
+					
+					#IF NO VARIANTS AT THAT POSITION ARE IN 1KG, RECORD AS ABSENT (THE CONDITION AFTER THE 'OR' DEALS WITH THE RARE CASE OF VARIANT ON chr x AND pos y IN OUR vcf WHILE IS PRESENT A VARIANT ON chr z AND pos y IN THE 1KG VCF
+					var_1KG_freq = c(var_1KG_freq,".")
+					var_1KG_allcount = c(var_1KG_allcount,0)
+					var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+					var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)
+					}
+				else{
+					#IF THERE IS SOMETHING AT THAT POSITION	
+					var_index_1KG = which(vcf1kg[,"POS"]==vcf[x,"POS"] & vcf1kg[,"CHROM"]==substr(vcf[x,"CHROM"],4,6) & sum(nchar(unlist(strsplit(as.character(vcf1kg[,"ALT"]),",")))==1)>0)
+
+					if(length(var_index_1KG)>0){
+						if((as.character(vcf1kg[var_index_1KG,"REF"]) == as.character(vcf[x,"REF"])) & (as.character(vcf1kg[var_index_1KG,"ALT"]) == as.character(vcf[x,"ALT"]))){ 
+
+							#IF THE SAME BIALLELIC VARIANT IS IN 1KG, STORE ALLELE FREQ % AND COUNT
+							
+							var_info = unlist(strsplit(as.character(vcf1kg[which(vcf1kg[,"POS"]==vcf[x,"POS"]),"INFO"]),";"))
+							
+							#TWO LINES TO GET TOTAL VAR FREQ IN 1KG#
+							var_freq = (as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))
+							var_count = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+
+							#IF/ELSE TO GET CAUCASIAN VAR FREQ IN 1KG#
+							if(sum(grepl("EUR_AF",var_info))==1){
+								var_freq_cauc = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,7)=="EUR_AF=")],"="))[2])
+								var_count_cauc = round(758*var_freq_cauc)
+								}
+							else{
+								var_freq_cauc = "."
+								var_count_cauc = 0
+								}	
+				
+							var_1KG_freq_cauc = c(var_1KG_freq_cauc,var_freq_cauc)
+							var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,var_count_cauc)
+							var_1KG_freq = c(var_1KG_freq,var_freq)
+							var_1KG_allcount = c(var_1KG_allcount,var_count)
+						}
+						
+						else if((as.character(vcf1kg[var_index_1KG,"REF"]) == as.character(vcf[x,"REF"])) & length(unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"]),",")))>1){
+							#IF THE SITE IS MULTIALLELIC IN 1KG
+							print("WARNING: multi-allelic position in Phase 1 of 1KG detected!")	#there should be no multiallelic variant calls in Phase 1 of 1KG!						
+							print("WARNING: total AC and MAF will be attached also to figures for Caucasians!")
+
+							if(vcf[x,"ALT"] %in% unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"])))){
+								#IF THE VARIANT IS WHITHIN THE ALLELES
+								var_allele_position = which(unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"]))) == as.character(vcf[x,"ALT"]))
+								var_info = unlist(strsplit(as.character(vcf1kg[which(vcf1kg[,"POS"]==vcf[x,"POS"]),"INFO"]),";"))
+								var_counts = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+								var_count = unlist(strsplit(var_counts,","))[var_allele_position]
+								var_freq = (var_count/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))
+								var_1KG_freq = c(var_1KG_freq,var_freq)
+								var_1KG_allcount = c(var_1KG_allcount,var_count)
+								var_1KG_freq_cauc = c(var_1KG_freq_cauc,var_freq)
+								var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,var_count)
+								}							
+							else{
+								var_1KG_freq = c(var_1KG_freq,".")
+								var_1KG_allcount = c(var_1KG_allcount,0)
+								var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+								var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)
+								}
+							}
+			
+						else{	#IF NOT SAME VARIANT AND NOT MULTIALLELIC THERE ARE TWO POSSIBILITIES: 1.SAME REF AND DIFFERENT ALLELE 2.DIFFERENT REF (SHOULD NEVER BE)
+							if(as.character(vcf1kg[var_index_1KG,"REF"]) == as.character(vcf[x,"REF"]) | nchar(as.character(vcf1kg[var_index_1KG,"REF"]))!=nchar(as.character(vcf[x,"REF"]))){
+								#E.G. IF IN THE SAME POSITION WHERE OUR SNP IS, THERE IS A DELETION/INSERTION IN 1KG
+								var_1KG_freq = c(var_1KG_freq,".")
+								var_1KG_allcount = c(var_1KG_allcount,0)
+								var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+								var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)
+								}
+							else{
+								#DIFFERENT REF ALLELE: VARIANTS WILL BE LATER DISCARDED
+								diff_ref_allele_1kg = c(diff_ref_allele_1kg,x)
+								var_1KG_freq = c(var_1KG_freq,".")
+								var_1KG_allcount = c(var_1KG_allcount,0)
+								var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+								var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)
+								print("WARNING: found a variant where a different reference allele is reported in 1KG Project!!")
+								}
+							}
+						}	
+					else{
+						var_1KG_freq = c(var_1KG_freq,".")
+						var_1KG_allcount = c(var_1KG_allcount,0)
+						var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+						var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)
+						}
+					}
+
+#####SNP - ESP#####			
+				#IF THERE IS NOTHING AT THAT POSITION IN ESP
+				if(length(which(ESPvcf[,"POS"]==vcf[x,"POS"]))==0 | length(which(ESPvcf[,"POS"]==vcf[x,"POS"] & ESPvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6)))==0){
+					var_esp_freq = "."
+					alt_ac_esp = 0
+					var_esp_freq_cauc = "."
+					alt_ac_esp_cauc = 0
+					var_esp_allno_cauc = NA
+					var_esp_allno = NA
+					}
+				else{
+					#IF THERE IS SOMETHING AT THAT POSITION
+					var_index_esp = which(ESPvcf[,"POS"]==vcf[x,"POS"] & ESPvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6) & sum(nchar(unlist(strsplit(as.character(ESPvcf[,"ALT"]),",")))==1)>0)
+					
+					if(length(var_index_esp)>0){
+						if(as.character(vcf[x,"REF"])==as.character(ESPvcf[var_index_esp,"REF"]) & as.character(vcf[x,"ALT"])==as.character(ESPvcf[var_index_esp,"ALT"])){
+						#IF REF AND ALT ALLELES ARE THE SAME	
+						
+						#TWO LINES AND IF/ELSE FOR TOTAL VAR FREQ IN ESP			
+							alt_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[1]#store alt allele count
+							ref_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[2]#store ref allele count
+							var_esp_allno = alt_ac_esp+ref_ac_esp
+							if(alt_ac_esp < ref_ac_esp){	#if alt allele is less common than ref allele (very often)
+								var_esp_freq = as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3])/100	#retain MAF as allele freq
+								}
+							else{
+								var_esp_freq = (100 - as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3]))/100
+								}
+						#TWO LINES AND IF/ELSE FOR CAUCASIAN VAR FREQ IN ESP
+							alt_ac_esp_cauc = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[1]#store alt allele count
+							ref_ac_esp_cauc = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[2]#store ref allele count
+							var_esp_allno_cauc = alt_ac_esp_cauc+ref_ac_esp_cauc							
+		
+							if(alt_ac_esp_cauc < ref_ac_esp_cauc){	#if alt allele is less common than ref allele (very often)
+								var_esp_freq_cauc = as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1]))/100	#retain MAF as allele freq
+								}
+							else{
+								var_esp_freq_cauc = (100 - as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1])))/100
+								}
+							}
+						else if((as.character(vcf[x,"REF"])==as.character(ESPvcf[var_index_esp,"REF"])) & length(unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"]),",")))>1){
+						#IF REF IS THE SAME BUT THE SITE IS MULTIALLELIC IN ESP							
+			
+							if(vcf[x,"ALT"] %in% unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"]),","))){
+							#IF THE VARIANT IS WITHIN THE ALLELES
+								var_allele_position = which(unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"]),",")) == as.character(vcf[x,"ALT"]))
+								
+							
+								#FOR TOTAL AC								
+								allele_counts_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))
+								
+								#FOR CAUCASIAN AC
+								allele_counts_esp_cauc = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))
+								
+								alt_ac_esp = allele_counts_esp[var_allele_position]
+								var_esp_freq = as.numeric((alt_ac_esp / sum(allele_counts_esp)))
+
+								alt_ac_esp_cauc = allele_counts_esp_cauc[var_allele_position]
+								var_esp_freq_cauc = as.numeric((alt_ac_esp_cauc / sum(allele_counts_esp_cauc)))
+
+								var_esp_allno_cauc = sum(alt_ac_esp_cauc)
+								var_esp_allno = sum(alt_ac_esp)
+								}
+							else{
+								alt_ac_esp = 0
+								var_esp_freq = "."
+								alt_ac_esp_cauc = 0
+								var_esp_freq_cauc = "."
+								var_esp_allno_cauc = NA
+								var_esp_allno = NA
+								}
+							}
+						else{	#IF NOT SAME VARIANT AND NOT MULTIALLELIC THERE ARE TWO POSSIBILITIES: 1.SAME REF AND DIFFERENT ALLELE 2.DIFFERENT REF (SHOULD NEVER BE)
+							if(as.character(ESPvcf[var_index_esp,"REF"]) == as.character(vcf[x,"REF"]) | nchar(as.character(ESPvcf[var_index_esp,"REF"]))!=nchar(as.character(vcf[x,"REF"]))){
+							#E.G. IF IN THE SAME POSITION WHERE OUR SNP IS, THERE IS A DELETION/INSERTION IN ESP
+								var_esp_freq = "."
+								alt_ac_esp = 0
+								var_esp_freq_cauc = "."
+								alt_ac_esp_cauc = 0
+								var_esp_allno_cauc = NA
+								var_esp_allno = NA
+								}
+							else{
+							#DIFFERENT REF ALLELE: VARIANTS WILL BE LATER DISCARDED
+								diff_ref_allele_esp = c(diff_ref_allele_esp,x)
+								var_esp_freq = "."
+								alt_ac_esp = 0
+								var_esp_freq_cauc = "."
+								alt_ac_esp_cauc = 0
+								var_esp_allno_cauc = NA
+								var_esp_allno = NA
+								print("WARNING: found a variant where a different reference allele is reported in ESP!!")
+								}
+							}				 
+						}
+					else{
+						var_esp_freq = "."
+						alt_ac_esp = 0
+						var_esp_freq_cauc = "."
+						alt_ac_esp_cauc = 0
+						var_esp_allno_cauc = NA
+						var_esp_allno = NA
+						}					
+					}
+
+#####SNP - EXAC#####			
+#IF THERE IS NOTHING AT THAT POSITION IN EXAC
+				if(length(which(EXACvcf[,"POS"]==vcf[x,"POS"]))==0 | length(which(EXACvcf[,"POS"]==vcf[x,"POS"] & EXACvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6)))==0){
+					var_exac_freq = "."
+					var_exac_allcount = 0
+					var_exac_allno = NA
+					}
+				else{
+				#IF THERE IS SOMETHING AT THAT POSITION
+					var_index_exac = which(EXACvcf[,"POS"]==vcf[x,"POS"] & EXACvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6) & sum(nchar(unlist(strsplit(as.character(EXACvcf[,"ALT"]),",")))==1)>0)
+					
+					if(length(var_index_exac)>0){
+						if(as.character(vcf[x,"REF"])==as.character(EXACvcf[var_index_exac,"REF"]) & as.character(vcf[x,"ALT"])==as.character(EXACvcf[var_index_exac,"ALT"])){
+						#IF REF AND ALT ALLELES ARE THE SAME							
+							var_exac_freq = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AF=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+							var_exac_allcount = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AC=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+							var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+							}
+						else if((as.character(vcf[x,"REF"])==as.character(EXACvcf[var_index_exac,"REF"])) & length(unlist(strsplit(as.character(EXACvcf[var_index_exac,"ALT"]),",")))>1){
+						#IF REF IS THE SAME BUT THE SITE IS MULTIALLELIC IN EXAC							
+			
+							if(vcf[x,"ALT"] %in% unlist(strsplit(as.character(EXACvcf[var_index_exac,"ALT"]),","))){
+							#IF THE VARIANT IS WITHIN THE ALLELES
+								var_allele_position = which(unlist(strsplit(as.character(EXACvcf[var_index_exac,"ALT"]),",")) == as.character(vcf[x,"ALT"]))
+								var_exac_freq = as.numeric(unlist(strsplit(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AF=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2],","))[var_allele_position])
+								var_exac_allcount = as.numeric(unlist(strsplit(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AC=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2],","))[var_allele_position])
+								var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+								}
+							else{
+								var_exac_freq = "."
+								var_exac_allcount = 0
+								var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+								}
+							}
+						else{	#IF NOT SAME VARIANT AND NOT MULTIALLELIC THERE ARE TWO POSSIBILITIES: 1.SAME REF AND DIFFERENT ALLELE 2.DIFFERENT REF (SHOULD NEVER BE)
+							if(as.character(EXACvcf[var_index_exac,"REF"]) == as.character(vcf[x,"REF"]) | nchar(as.character(EXACvcf[var_index_exac,"REF"]))!=nchar(as.character(vcf[x,"REF"]))){
+							#E.G. IF IN THE SAME POSITION WHERE OUR SNP IS, THERE IS A DELETION/INSERTION IN EXAC
+								var_exac_freq = "."
+								var_exac_allcount = 0
+								var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+								}
+							else{
+							#DIFFERENT REF ALLELE: VARIANTS WILL BE LATER DISCARDED
+								diff_ref_allele_exac = c(diff_ref_allele_exac,x)
+								var_exac_freq = "."
+								var_exac_allcount = 0
+								var_exac_allno = NA
+								print("WARNING: found a variant where a different reference allele is reported in EXAC!!")
+								}
+							}				 
+						}
+					else{
+						var_exac_freq = "."
+						var_exac_allcount = 0
+						var_exac_allno = NA
+						}					
+					}
+				}	
+
+#####INSERTION - 1000 GENOMES#####
+
+		#IF IT IS AN INSERTION
+			else if(nchar(as.character(vcf[x,"REF"])) < nchar(as.character(vcf[x,"ALT"]))){
+			
+			
+				if(length(which(vcf1kg[,"POS"]==vcf[x,"POS"]))==0 | length(which(vcf1kg[,"POS"]==vcf[x,"POS"] & vcf1kg[,"CHROM"]==substr(vcf[x,"CHROM"],4,6)))==0){
+				#IF NOT IN 1KG, RECORD AS ABSENT
+					var_1KG_freq = c(var_1KG_freq,".")
+					var_1KG_allcount = c(var_1KG_allcount,0)
+					var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+					var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)	
+					}
+				else{
+				#IF THERE IS SOMETHING AT THAT POSITION
+					var_index_1KG = which(vcf1kg[,"POS"]==vcf[x,"POS"] & vcf1kg[,"CHROM"]==substr(vcf[x,"CHROM"],4,6) & nchar(as.character(vcf1kg[,"REF"]))<nchar(as.character(vcf1kg[,"ALT"])) & (!grepl(",",as.character(vcf1kg[,"ALT"])))) #store row index where that position is in 1KG
+				
+					if(length(var_index_1KG)>0){
+						if(as.character(vcf1kg[var_index_1KG,"ALT"]) == as.character(vcf[x,"ALT"])){
+					
+						#IF IT IS THE SAME VARIANT, STORE PERCENT ALLELE FREQ AND COUNT
+					
+							var_info = unlist(strsplit(as.character(vcf1kg[var_index_1KG,"INFO"]),";"))
+							
+							#FOR TOTAL VAR FREQ
+							var_freq = (as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))
+							var_count = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+							#FOR CAUCASIAN VAR FREQ
+							if(sum(grepl("EUR_AF",var_info))==1){
+								var_freq_cauc = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,7)=="EUR_AF=")],"="))[2])
+								var_count_cauc = round(758*var_freq)
+								}
+							else{
+								var_freq_cauc = "."
+								var_count_cauc = 0
+								}
+										
+							var_1KG_freq = c(var_1KG_freq,var_freq)
+							var_1KG_allcount = c(var_1KG_allcount,var_count)
+							var_1KG_freq_cauc = c(var_1KG_freq_cauc,var_freq_cauc)
+							var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,var_count_cauc)
+							}
+
+						else if(length(unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"]),",")))>1){
+						#IF THE SITE IS MULTIALLELIC IN 1KG
+
+							print("WARNING: multi-allelic position in Phase 1 of 1KG detected!")	#there should be no multiallelic variant calls in Phase 1 of 1KG!
+							print("WARNING: total AC and MAF will be attached also to figures for Caucasians!")
+
+							if(vcf[x,"ALT"] %in% unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"])))){
+							#IF VARIANT IS WITHIN THE ALLELES
+								var_allele_position = which(unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"]))) == as.character(vcf[x,"ALT"]))
+								var_info = unlist(strsplit(as.character(vcf1kg[which(vcf1kg[,"POS"]==vcf[x,"POS"]),"INFO"]),";"))
+								var_counts = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+								var_count = unlist(strsplit(var_counts,","))[var_allele_position]
+								var_freq = (var_count/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))
+								var_1KG_freq = c(var_1KG_freq,var_freq)
+								var_1KG_allcount = c(var_1KG_allcount,var_count)
+								var_1KG_freq_cauc = c(var_1KG_freq_cauc,var_freq)
+								var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,var_count)
+								}
+							else{
+								var_1KG_freq = c(var_1KG_freq,".")
+								var_1KG_allcount = c(var_1KG_allcount,0)
+								var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+								var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)	
+								}
+							}
+						else{
+						#IF E.G. IN THE SAME POSITION WHERE OUR INSERTION IS, THERE IS A SNP IN 1KG
+							var_1KG_freq = c(var_1KG_freq,".")
+							var_1KG_allcount = c(var_1KG_allcount,0)
+							var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+							var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)	
+							}		
+						}
+					else{
+						var_1KG_freq = c(var_1KG_freq,".")
+						var_1KG_allcount = c(var_1KG_allcount,0)
+						var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+						var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)
+						}				
+					}
+
+#####INSERTION - ESP#####
+				if(length(which(ESPvcf[,"POS"]==vcf[x,"POS"]))==0 | length(which(ESPvcf[,"POS"]==vcf[x,"POS"] & ESPvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6)))==0){
+				#IF THERE IS NOTHING AT THAT POSITION IN ESP
+					var_esp_freq = "."
+					alt_ac_esp = 0
+					var_esp_freq_cauc = "."
+					alt_ac_esp_cauc = 0
+					var_esp_allno_cauc = NA
+					var_esp_allno = NA
+					}
+				
+				else{		
+				#IF A VARIANT AT THAT POSITION IS IN ESP---NB:FOR INSERTIONS POS(ESP)=END(BEEHIVE)
+					var_index_esp = which(ESPvcf[,"POS"]==vcf[x,"POS"] & ESPvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6) & nchar(as.character(ESPvcf[,"REF"]))<nchar(as.character(ESPvcf[,"ALT"])) & (!grepl(",",as.character(ESPvcf[,"ALT"]))))
+	
+					if(length(var_index_esp)>0){
+
+					#NB only ALT can be checked if it is an insertion, REF is always "-" for our variant
+						if(as.character(ESPvcf[var_index_esp,"ALT"])==as.character(vcf[x,"ALT"])){
+						#IF IT IS THE SAME VARIANT
+							
+							#TWO LINES AND IF/ELSE FOR TOTAL VAR FREQ IN ESP
+							alt_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[1]#store alt allele count
+							ref_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[2]#store ref allele count
+							var_esp_allno = alt_ac_esp+ref_ac_esp
+							if(alt_ac_esp < ref_ac_esp){	#if alt allele is less common than ref allele (very often)
+								var_esp_freq = as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3])/100	#retain MAF as allele freq
+								}
+							else{
+								var_esp_freq = (100 - as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3]))/100
+								}
+
+							#TWO LINES AND IF/ELSE FOR CAUCASIAN VAR FREQ IN ESP
+							alt_ac_esp_cauc = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[1]#store alt allele count
+							ref_ac_esp_cauc = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[2]#store ref allele count						
+							var_esp_allno_cauc = alt_ac_esp_cauc+ref_ac_esp_cauc
+	
+							if(alt_ac_esp_cauc < ref_ac_esp_cauc){	#if alt allele is less common than ref allele (very often)
+								var_esp_freq_cauc = as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1]))/100	#retain MAF as allele freq
+								}
+							else{
+								var_esp_freq_cauc = (100 - as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1])))/100
+								}	
+
+							
+							}
+
+						else if(length(unlist(strsplit(as.character(ESPvcf[var_index_esp,"REF"]),",")))>1){
+						#IF THE SITE IS MULTIALLELIC
+							if(vcf[x,"ALT"] %in% unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"])))){
+							#IF THE VARIANT IS WITHIN THE ALLELES
+								var_allele_position = which(unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"]),",")) == as.character(vcf[x,"ALT"]))
+
+								#FOR TOTAL AC								
+								allele_counts_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))
+
+								#FOR CAUCASIAN AC
+								allele_counts_esp_cauc = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))
+																	
+
+								alt_ac_esp = allele_counts_esp[var_allele_position]
+								var_esp_freq = as.numeric((alt_ac_esp / sum(allele_counts_esp)))
+								alt_ac_esp_cauc = allele_counts_esp_cauc[var_allele_position]
+								var_esp_freq_cauc = as.numeric((alt_ac_esp_cauc / sum(allele_counts_esp_cauc)))
+								
+								var_esp_allno_cauc = sum(allele_counts_esp_cauc)
+								var_esp_allno = sum(allele_counts_esp)								
+								}
+							else{
+							#IF THE VARIANT IS NOT WITHIN THE ALLELES
+								var_esp_freq = "."
+								alt_ac_esp = 0
+								var_esp_freq_cauc = "."
+								alt_ac_esp_cauc = 0
+								var_esp_allno_cauc = NA
+								var_esp_allno = NA
+								}
+							}
+						else{
+						#IF E.G. IN THE SAME POSITION WHERE OUR INSERTION IS, THERE IS A SNP IN 1KG
+							var_esp_freq_cauc = "."
+							alt_ac_esp_cauc = 0
+							var_esp_allno_cauc = NA
+							var_esp_allno = NA
+							}
+						}
+					else{
+						var_esp_freq = "."
+						alt_ac_esp = 0
+						var_esp_freq_cauc = "."
+						alt_ac_esp_cauc = 0
+						var_esp_allno_cauc = NA
+						var_esp_allno = NA
+						}
+					}
+
+#####INSERTION - EXAC#####
+				if(length(which(EXACvcf[,"POS"]==vcf[x,"POS"]))==0 | length(which(EXACvcf[,"POS"]==vcf[x,"POS"] & EXACvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6)))==0){
+				#IF THERE IS NOTHING AT THAT POSITION IN EXAC
+					var_exac_freq = "."
+					var_exac_allcount = 0
+					var_exac_allno = NA
+					}
+				
+				else{	
+				#IF A VARIANT AT THAT POSITION IS IN EXAC---NB:FOR INSERTIONS POS(EXAC)=END(BEEHIVE)
+					var_index_exac = which(EXACvcf[,"POS"]==vcf[x,"POS"] & EXACvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6) & nchar(as.character(EXACvcf[,"REF"]))<nchar(as.character(EXACvcf[,"ALT"])) & (!grepl(",",as.character(EXACvcf[,"ALT"]))))
+	
+					if(length(var_index_exac)>0){
+
+					#NB only ALT can be checked if it is an insertion, REF is always "-" for our variant
+						if(as.character(EXACvcf[var_index_exac,"ALT"])==as.character(vcf[x,"ALT"])){
+						#IF IT IS THE SAME VARIANT
+							var_exac_freq = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AF=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+							var_exac_allcount = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AC=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+							var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+							}
+		
+						else if(length(unlist(strsplit(as.character(EXACvcf[var_index_exac,"REF"]),",")))>1){
+						#IF THE SITE IS MULTIALLELIC
+							if(vcf[x,"ALT"] %in% unlist(strsplit(as.character(EXACvcf[var_index_exac,"ALT"])))){
+							#IF THE VARIANT IS WITHIN THE ALLELES
+								var_allele_position = which(unlist(strsplit(as.character(EXACvcf[var_index_exac,"ALT"]),",")) == as.character(vcf[x,"ALT"]))
+								var_exac_freq = as.numeric(unlist(strsplit(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AF=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2],","))[var_allele_position])
+								var_exac_allcount = as.numeric(unlist(strsplit(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AC=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2],","))[var_allele_position])
+								var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+								}
+							else{
+							#IF THE VARIANT IS NOT WITHIN THE ALLELES
+								var_exac_freq = "."
+								var_exac_allcount = 0
+								var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+								}
+							}
+						else{
+						#IF E.G. IN THE SAME POSITION WHERE OUR INSERTION IS, THERE IS A SNP IN 1KG
+							var_exac_freq = "."
+							var_exac_allcount = 0
+							var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+							}
+						}
+					else{
+						var_exac_freq = "."
+						var_exac_allcount = 0
+						var_exac_allno = NA
+						}
+					}
+				}
+
+#####DELETION - 1000 GENOMES#####						
+		#IF IT IS A DELETION
+			else if(nchar(as.character(vcf[x,"REF"])) > nchar(as.character(vcf[x,"ALT"]))){
+	
+				if(length(which(vcf1kg[,"POS"]==vcf[x,"POS"]))==0 | length(which(vcf1kg[,"POS"]==vcf[x,"POS"] & vcf1kg[,"CHROM"]==substr(vcf[x,"CHROM"],4,6)))==0){
+				
+				#IF THERE IS NOTHING AT THAT POSITION IN 1KG				
+					var_1KG_freq = c(var_1KG_freq,".")
+					var_1KG_allcount = c(var_1KG_allcount,0)
+					var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+					var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)		
+					}
+				else{	
+				#IF THERE IS SOMETHING AT THAT POSITION IN 1KG	
+					var_index_1KG = which(vcf1kg[,"POS"]==vcf[x,"POS"] & vcf1kg[,"CHROM"]==substr(vcf[x,"CHROM"],4,6) & nchar(as.character(vcf1kg[,"REF"]))>nchar(as.character(vcf1kg[,"ALT"])) & (!grepl(",",as.character(vcf1kg[,"ALT"]))))
+
+					if(length(var_index_1KG)>0){
+							if(as.character(vcf1kg[var_index_1KG,"REF"]) == as.character(vcf[x,"REF"])){
+							#IF SAME VARIANT, STORE PERCENT ALLELE FREQ AND COUNT
+								var_info = unlist(strsplit(as.character(vcf1kg[var_index_1KG,"INFO"]),";"))
+							
+								var_freq = (as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))
+								var_count = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+								#IF/ELSE TO GET CAUCASIAN VAR FREQ IN 1KG#
+								if(sum(grepl("EUR_AF",var_info))==1){
+									var_freq_cauc = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,7)=="EUR_AF=")],"="))[2])
+									var_count_cauc = round(758*var_freq)
+									}
+								else{
+									var_freq_cauc = "."
+									var_count_cauc = 0
+									}	
+
+
+								var_1KG_freq = c(var_1KG_freq,var_freq)
+								var_1KG_allcount = c(var_1KG_allcount,var_count)
+								var_1KG_freq_cauc = c(var_1KG_freq_cauc,var_freq_cauc)
+								var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,var_count_cauc)
+								}
+							else{				#NB: A DELETION CAN'T BE 'MULTIALLELIC'. EITHER IT IS THE SAME DELETION OR NOT.
+								var_1KG_freq = c(var_1KG_freq,".")
+								var_1KG_allcount = c(var_1KG_allcount,0)
+								var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+								var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)
+								}
+							}
+					else{
+						var_1KG_freq = c(var_1KG_freq,".")
+						var_1KG_allcount = c(var_1KG_allcount,0)
+						var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+						var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)
+						}
+					}
+		
+#####DELETION - ESP#####
+					if(length(which(ESPvcf[,"POS"]==vcf[x,"POS"]))==0 | length(which(ESPvcf[,"POS"]==vcf[x,"POS"] & ESPvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6)))==0){
+					#IF THERE IS NOTHING AT THAT POSITION IN ESP
+						var_esp_freq = "."
+						alt_ac_esp = 0
+						var_esp_freq_cauc = "."
+						alt_ac_esp_cauc = 0
+						var_esp_allno_cauc = NA
+						var_esp_allno = NA
+						}
+
+				#IF A VARIANT AT THAT POSITION IS IN ESP---NB:FOR DELETIONS POS(ESP)=START-1(BEEHIVE)
+					else{
+
+						var_index_esp = which(ESPvcf[,"POS"]==vcf[x,"POS"] & ESPvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6) & nchar(as.character(ESPvcf[,"REF"]))>nchar(as.character(ESPvcf[,"ALT"])) & (!grepl(",",as.character(ESPvcf[,"ALT"]))))
+
+						if(length(var_index_esp)>0){
+							if(as.character(ESPvcf[var_index_esp,"REF"]) == as.character(vcf[x,"REF"])){
+							#IF SAME VARIANT, STORE COUNT AND FREQ
+							
+								alt_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[1]#store alt allele count
+								ref_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[2]#store ref allele count
+								var_esp_allno = alt_ac_esp+ref_ac_esp
+								if(alt_ac_esp < ref_ac_esp){	#if alt allele is less common than ref allele (very often)
+									var_esp_freq = as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3])/100	#retain MAF as allele freq
+									}
+								else{
+									var_esp_freq = (100 - as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3]))/100
+									}
+
+								#TWO LINES AND IF/ELSE FOR CAUCASIAN VAR FREQ IN ESP
+								alt_ac_esp_cauc = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[1]#store alt allele count
+								ref_ac_esp_cauc = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[2]#store ref allele count
+								var_esp_allno_cauc = alt_ac_esp_cauc+ref_ac_esp_cauc								
+
+								if(alt_ac_esp_cauc < ref_ac_esp_cauc){	#if alt allele is less common than ref allele (very often)
+									var_esp_freq_cauc = as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1]))/100	#retain MAF as allele freq
+									}
+								else{
+									var_esp_freq_cauc = (100 - as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1])))/100
+									}
+	
+								}
+							else{
+							#EITHER DIFFERENT VAR TYPE AT SAME POS IN ESP OR DELETION OF DIFFERENT LENGTH BUT SAME POSITION
+								var_esp_freq = "."
+								alt_ac_esp = 0
+								var_esp_freq_cauc = "."
+								alt_ac_esp_cauc = 0
+								var_esp_allno_cauc = NA
+								var_esp_allno = NA
+								}
+							}
+						else{
+							var_esp_freq = "."
+							alt_ac_esp = 0
+							var_esp_freq_cauc = "."
+							alt_ac_esp_cauc = 0
+							var_esp_allno_cauc = NA
+							var_esp_allno = NA
+							}										
+						}
+
+#####DELETION - EXAC#####
+					if(length(which(EXACvcf[,"POS"]==vcf[x,"POS"]))==0 | length(which(EXACvcf[,"POS"]==vcf[x,"POS"] & EXACvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6)))==0){
+					#IF THERE IS NOTHING AT THAT POSITION IN EXAC
+						var_exac_freq = "."
+						var_exac_allcount = 0
+						var_exac_allno = NA
+						}
+
+				#IF A VARIANT AT THAT POSITION IS IN EXAC---NB:FOR DELETIONS POS(EXAC)=START-1(BEEHIVE)
+					else{
+						var_index_exac = which(EXACvcf[,"POS"]==vcf[x,"POS"] & EXACvcf[,"CHROM"]==substr(vcf[x,"CHROM"],4,6) & nchar(as.character(EXACvcf[,"REF"]))>nchar(as.character(EXACvcf[,"ALT"])) & (!grepl(",",as.character(EXACvcf[,"ALT"]))))
+
+						if(length(var_index_exac)>0){
+							if(as.character(EXACvcf[var_index_exac,"REF"]) == as.character(vcf[x,"REF"])){
+							#IF SAME VARIANT, STORE COUNT AND FREQ
+								var_exac_freq = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AF=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+								var_exac_allcount = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AC=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+								var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+								}
+							else{
+							#EITHER DIFFERENT VAR TYPE AT SAME POS IN EXAC OR DELETION OF DIFFERENT LENGTH BUT SAME POSITION
+								var_exac_freq = "."
+								var_exac_allcount = 0
+								var_exac_allno = as.numeric(unlist(strsplit(unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";"))[grep("AN=",unlist(strsplit(as.character(EXACvcf[var_index_exac,"INFO"]),";")))],"="))[2])
+								}
+							}
+						else{
+							var_exac_freq = "."
+							var_exac_allcount = 0
+							var_exac_allno = NA
+							}										
+						}
+					}
+
+#####COMPLEX INDEL#####
+			else{
+			# COMPLEX INDELS (INSERTION + DELETION) CAN NOT BE ANALYZED AND WILL BE LATER DISCARDED
+				complex_indels = c(complex_indels,x)			
+				var_1KG_freq = c(var_1KG_freq,".")
+				var_1KG_allcount = c(var_1KG_allcount,0)
+				var_esp_freq = "."
+				alt_ac_esp = 0
+				var_1KG_freq_cauc = c(var_1KG_freq_cauc,".")
+				var_1KG_allcount_cauc = c(var_1KG_allcount_cauc,0)
+				var_esp_freq_cauc = "."
+				var_esp_allno_cauc = NA
+				var_esp_allno = NA
+				alt_ac_esp_cauc = 0
+				var_exac_freq = "."
+				var_exac_allcount = 0
+				var_exac_allno = NA
+				}
+
+		#STORE IN LOGICAL VECTOR IF COVERED IN ESP OR NOT
+		
+			if(sum((subset(ESPcov,ESPcov[,"CHROM"]==substr(vcf[x,"CHROM"],4,5))[,"START"]<=vcf[x,"POS"] & subset(ESPcov,ESPcov[,"CHROM"]==substr(vcf[x,"CHROM"],4,5))[,"END"]>=vcf[x,"POS"])==T)==1){
+				covered_in_ESP = c(covered_in_ESP,T)
+				}
+			else{
+				covered_in_ESP = c(covered_in_ESP,F)
+				}
+
+			gene_var = unlist(gene_info[which(gene_info[,"CHROM"]==vcf[x,"CHROM"] & gene_info[,"START"]<vcf[x,"POS"] & gene_info[,"END"]>vcf[x,"POS"]),"GENE"])
+		
+			GENE = c(GENE,gene_var)	
+	
+			var_ESP_freq = c(var_ESP_freq,var_esp_freq)
+			var_ESP_allcount = c(var_ESP_allcount,alt_ac_esp)
+			var_ESP_freq_cauc = c(var_ESP_freq_cauc,var_esp_freq_cauc)
+			var_ESP_allcount_cauc = c(var_ESP_allcount_cauc,alt_ac_esp_cauc)
+			var_ESP_allno_cauc = c(var_ESP_allno_cauc,var_esp_allno_cauc)
+			var_ESP_allno = c(var_ESP_allno,var_esp_allno)
+			var_EXAC_freq = c(var_EXAC_freq,var_exac_freq)
+			var_EXAC_allcount = c(var_EXAC_allcount,var_exac_allcount)
+			var_EXAC_allno = c(var_EXAC_allno,var_exac_allno)
+	
+		}	#NB this bracket closes the main for loop (that going over each variant)
+		
+		
+		freqtable = cbind(vcf[,c("CHROM","POS","REF","ALT")],GENE,var_ESP_freq,var_ESP_allcount,var_ESP_allno,var_ESP_freq_cauc,var_ESP_allcount_cauc,var_ESP_allno_cauc,covered_in_ESP,var_1KG_freq,var_1KG_allcount,var_1KG_freq_cauc,var_1KG_allcount_cauc,var_EXAC_freq,var_EXAC_allcount,var_EXAC_allno,HET_SAMPLES,HOM_SAMPLES,ALL_COUNT,ALL_NO,NO_CALLS,MEAN_READ_DEPTH)		
+		colnames(freqtable) = c("CHROM","POS","REF","ALT","GENE","var_ESP_freq","var_ESP_allcount","var_ESP_allno","var_ESP_freq_cauc","var_ESP_allcount_cauc","var_ESP_allno_cauc","covered_in_ESP","var_1KG_freq","var_1KG_allcount","var_1KG_freq_cauc","var_1KG_allcount_cauc","var_EXAC_freq","var_EXAC_allcount","var_EXAC_allno","HET_SAMPLES","HOM_SAMPLES","ALL_COUNT","ALL_NO","NO_CALLS","MEAN_RDEPTH")		
+		
+		if(length(complex_indels)>0){			
+			if(casecontrol == 0){
+				write.table(freqtable[complex_indels,"POS"],"toremove_cases.txt",col.names=F,row.names=F,quote=F)
+				freqtable = freqtable[-c(complex_indels),]
+				system(paste("cat temp_vcf_cases3.vcf | java -jar ",snpEff_dir,"SnpSift.jar filter --set toremove_cases.txt \"!(POS in SET[0])\" > temp_vcf_cases4.vcf",sep=""))	
+				system("rm toremove* snpEff*")
+				}
+			else{
+				write.table(freqtable[complex_indels,"POS"],"toremove_controls.txt",col.names=F,row.names=F,quote=F)
+				freqtable = freqtable[-c(complex_indels),]
+				system(paste("cat temp_vcf_controls3.vcf | java -jar ",snpEff_dir,"SnpSift.jar filter --set toremove_controls.txt \"!(POS in SET[0])\" > temp_vcf_controls4.vcf",sep=""))
+				system("rm toremove* snpEff*")
+				}
+			}
+		else{
+			system("mv temp_vcf_cases3.vcf temp_vcf_cases4.vcf")
+			system("mv temp_vcf_controls3.vcf temp_vcf_controls4.vcf")
+			}
+		
+#HW AND FISHER FROM HERE, SEPARATELY, MW LATER ON JOINT TABLE
+		FISHER_PVALUE = c()
+
+		freqtable[,"var_ESP_freq_cauc"] = as.character(freqtable[,"var_ESP_freq_cauc"])
+		freqtable[,"var_1KG_freq_cauc"] = as.character(freqtable[,"var_1KG_freq_cauc"])
+		freqtable[which(freqtable[,"var_ESP_freq_cauc"]=="."),"var_ESP_freq_cauc"] = 0
+		freqtable[which(freqtable[,"var_1KG_freq_cauc"]=="."),"var_1KG_freq_cauc"] = 0
+		freqtable[,"var_ESP_allcount_cauc"] = as.numeric(as.character(freqtable[,"var_ESP_allcount_cauc"]))
+		freqtable[,"var_ESP_freq_cauc"] = as.numeric(as.character(freqtable[,"var_ESP_freq_cauc"]))
+		freqtable[,"var_1KG_allcount_cauc"] = as.numeric(as.character(freqtable[,"var_1KG_allcount_cauc"]))
+		freqtable[,"var_1KG_freq_cauc"] = as.numeric(as.character(freqtable[,"var_1KG_freq_cauc"]))
+		freqtable[,"var_ESP_freq"] = as.character(freqtable[,"var_ESP_freq"])
+		freqtable[,"var_1KG_freq"] = as.character(freqtable[,"var_1KG_freq"])
+		freqtable[which(freqtable[,"var_ESP_freq"]=="."),"var_ESP_freq"] = 0
+		freqtable[which(freqtable[,"var_1KG_freq"]=="."),"var_1KG_freq"] = 0
+		freqtable[,"var_ESP_allcount"] = as.numeric(as.character(freqtable[,"var_ESP_allcount"]))
+		freqtable[,"var_ESP_freq"] = as.numeric(as.character(freqtable[,"var_ESP_freq"]))
+		freqtable[,"var_1KG_allcount"] = as.numeric(as.character(freqtable[,"var_1KG_allcount"]))
+		freqtable[,"var_1KG_freq"] = as.numeric(as.character(freqtable[,"var_1KG_freq"]))
+
+		if(casecontrol == 0){
+			no_samples = no_cases
+			}
+		else{
+			no_samples = no_controls
+			}	
+
+
+		for(y in 1:dim(freqtable)[1]){	
+
+			if(refcohort == 1){
+				if((is.na(freqtable[y,"var_EXAC_allno"])==F) & freqtable[y,"CHROM"]!="chrX"){
+					a = freqtable[y,"var_EXAC_allcount"]
+					b = freqtable[y,"var_EXAC_allno"] - a
+					c = freqtable[y,"ALL_COUNT"]
+					d = (no_samples*2)-(freqtable[y,"NO_CALLS"]*2)-c
+
+					pvalue = fisher.test(matrix(c(a,b,c,d),2,2))$p.value
+					}
+	
+				else if(freqtable[y,"var_EXAC_allcount"]==0 & freqtable[y,"CHROM"]!="chrX"){
+					a = 0
+					allnumbs_gene = var_EXAC_allno[as.logical(GENE==freqtable[y,"GENE"])]
+					b = round(mean(subset(allnumbs_gene,allnumbs_gene!=0))) - a
+					c = freqtable[y,"ALL_COUNT"]
+					d = (no_samples*2)-(freqtable[y,"NO_CALLS"]*2)-c
+
+					pvalue = fisher.test(matrix(c(a,b,c,d),2,2))$p.value
+					}
+
+				else{
+					pvalue = NA
+					}
+				}
+	
+			else if(refcohort == 2){	
+				if(freqtable[y,"CHROM"]!="chrX" & freqtable[y,"var_ESP_allcount"]!=0 & freqtable[y,"var_1KG_allcount"]!=0){
+					a = freqtable[y,"var_ESP_allcount"] + freqtable[y,"var_1KG_allcount"]
+					b = (round(freqtable[y,"var_ESP_allcount"]/freqtable[y,"var_ESP_freq"])+round(freqtable[y,"var_1KG_allcount"]/freqtable[y,"var_1KG_freq"]))-a
+					c = freqtable[y,"ALL_COUNT"]
+					d = (no_samples*2)-(freqtable[y,"NO_CALLS"]*2)-c
+			
+					pvalue = fisher.test(matrix(c(a,b,c,d),2,2))$p.value
+					}
+				else if(freqtable[y,"CHROM"]!="chrX" & (freqtable[y,"var_ESP_allcount"]==0 | freqtable[y,"var_1KG_allcount"]==0) & freqtable[y,"covered_in_ESP"]==T){
+					a = freqtable[y,"var_ESP_allcount"] + freqtable[y,"var_1KG_allcount"]
+					allnumbs_gene = var_ESP_allno[as.logical(GENE==freqtable[y,"GENE"])]
+					b = round(mean(subset(allnumbs_gene,allnumbs_gene!=0),na.rm=T)) - a
+					c = freqtable[y,"ALL_COUNT"]
+					d = (no_samples*2)-(freqtable[y,"NO_CALLS"]*2)-c
+			
+					pvalue = fisher.test(matrix(c(a,b,c,d),2,2))$p.value
+					}
+				else if(freqtable[y,"CHROM"]!="chrX" & (freqtable[y,"var_ESP_allcount"]==0 | freqtable[y,"var_1KG_allcount"]==0) & freqtable[y,"covered_in_ESP"]==F){
+					a = freqtable[y,"var_ESP_allcount"] + freqtable[y,"var_1KG_allcount"]
+					b = 2184-a
+					c = freqtable[y,"ALL_COUNT"]
+					d = (no_samples*2)-(freqtable[y,"NO_CALLS"]*2)-c
+			
+					pvalue = fisher.test(matrix(c(a,b,c,d),2,2))$p.value
+					}
+				else{
+					pvalue = NA
+					}
+				}
+			else{
+				stop("The indication of the cohort must be either 1 or 2")
+				}
+
+			FISHER_PVALUE = c(FISHER_PVALUE,pvalue)
+			}
+
+
+		gts_table_temp = cbind(freqtable$HET_SAMPLES,freqtable$HOM_SAMPLES)	
+		gts_table = cbind((rep(no_samples,dim(gts_table_temp)[1])-freqtable$NO_CALLS-gts_table_temp[,1]-gts_table_temp[,2]),gts_table_temp)
+		colnames(gts_table) = c("AA","AB","BB")
+		
+		HW_PVALUE = HWExactMat(gts_table)$pval
+	
+		freqtable = cbind(freqtable,FISHER_PVALUE,HW_PVALUE)
+
+
+		if(casecontrol == 0){
+			colnames(freqtable) = c("CHROM","POS","REF","ALT","GENE","var_ESP_freq","var_ESP_allcount","var_ESP_allno","var_ESP_freq_cauc","var_ESP_allcount_cauc","var_ESP_allno_cauc","covered_in_ESP","var_1KG_freq","var_1KG_allcount","var_1KG_freq_cauc","var_1KG_allcount_cauc","var_EXAC_freq","var_EXAC_allcount","var_EXAC_allno","HET_SAMPLES_CASES","HOM_SAMPLES_CASES","ALL_COUNT_CASES","ALL_NO_CASES","NO_CALLS_CASES","MEAN_PASSQUAL_READDEPTH_CASES","FISHER_PVALUE_CASES","HW_PVALUE_CASES")			
+			freqtable_cases = freqtable
+			}
+		else{
+			colnames(freqtable) = c("CHROM","POS","REF","ALT","GENE","var_ESP_freq","var_ESP_allcount","var_ESP_allno","var_ESP_freq_cauc","var_ESP_allcount_cauc","var_ESP_allno_cauc","covered_in_ESP","var_1KG_freq","var_1KG_allcount","var_1KG_freq_cauc","var_1KG_allcount_cauc","var_EXAC_freq","var_EXAC_allcount","var_EXAC_allno","HET_SAMPLES_CONTROLS","HOM_SAMPLES_CONTROLS","ALL_COUNT_CONTROLS","ALL_NO_CONTROLS","NO_CALLS_CONTROLS","MEAN_PASSQUAL_READDEPTH_CONTROLS","FISHER_PVALUE_CONTROLS","HW_PVALUE_CONTROLS")
+			freqtable_controls = freqtable
+			freqtable = merge(freqtable_cases,freqtable_controls,by=c("CHROM","POS","REF","ALT","GENE","var_ESP_freq","var_ESP_allcount","var_ESP_allno","var_ESP_freq_cauc","var_ESP_allcount_cauc","var_ESP_allno_cauc","covered_in_ESP","var_1KG_freq","var_1KG_allcount","var_1KG_freq_cauc","var_1KG_allcount_cauc","var_EXAC_freq","var_EXAC_allcount","var_EXAC_allno"),all=T)			
+
+			freqtable[which(is.na(freqtable[,"FISHER_PVALUE_CASES"])),"FISHER_PVALUE_CASES"] = "Not_tested"
+			freqtable[which(is.na(freqtable[,"FISHER_PVALUE_CONTROLS"])),"FISHER_PVALUE_CONTROLS"] = "Not_tested"
+			freqtable[which(is.na(freqtable[,"HW_PVALUE_CASES"])),"HW_PVALUE_CASES"] = "Not_tested"
+			freqtable[which(is.na(freqtable[,"HW_PVALUE_CONTROLS"])),"HW_PVALUE_CONTROLS"] = "Not_tested"	
+
+			freqtable[,c("HET_SAMPLES_CASES","HOM_SAMPLES_CASES","ALL_COUNT_CASES","NO_CALLS_CASES","HET_SAMPLES_CONTROLS","HOM_SAMPLES_CONTROLS","ALL_COUNT_CONTROLS","NO_CALLS_CONTROLS")][is.na(freqtable[c("HET_SAMPLES_CASES","HOM_SAMPLES_CASES","ALL_COUNT_CASES","NO_CALLS_CASES","HET_SAMPLES_CONTROLS","HOM_SAMPLES_CONTROLS","ALL_COUNT_CONTROLS","NO_CALLS_CONTROLS")])] = 0
+			freqtable = freqtable[-c(which(freqtable[,"ALL_COUNT_CASES"]==0 & freqtable[,"ALL_COUNT_CONTROLS"]==0)),]
+			
+			freqtable_cases = subset(freqtable_cases,freqtable_cases$POS %in% freqtable$POS)
+			freqtable_controls = subset(freqtable_controls,freqtable_controls$POS %in% freqtable$POS)
+			
+			failedtest = suppressWarnings(which((as.numeric(as.character(freqtable$HW_PVALUE_CASES))<(0.05/dim(freqtable_cases)[1])) | (as.numeric(as.character(freqtable$FISHER_PVALUE_CASES))<(0.05/dim(freqtable_cases)[1])) | (as.numeric(as.character(freqtable$HW_PVALUE_CONTROLS))<(0.05/dim(freqtable_controls)[1])) | (as.numeric(as.character(freqtable$FISHER_PVALUE_CONTROLS))<(0.05/dim(freqtable_controls)[1]))))			
+###			failedtest = suppressWarnings(which((as.numeric(as.character(freqtable$HW_PVALUE_CASES))<(0.05/889)) | (as.numeric(as.character(freqtable$HW_PVALUE_CONTROLS))<(0.05/896)) | (as.numeric(as.character(freqtable$FISHER_PVALUE_CASES))<(0.05/889)) | (as.numeric(as.character(freqtable$FISHER_PVALUE_CONTROLS))<(0.05/896))))		
+	
+			if(length(failedtest)>0){
+				write.table(freqtable[c(failedtest),"POS"],"toremove_fromvcfs.txt",col.names=F,row.names=F,quote=F)
+				freqtable = suppressWarnings(freqtable[-c(failedtest),])
+				}
+			}
+		casecontrol = casecontrol + 1
+		}
+
+
+	MW_PVALUE = c()
+	MEAN_TOTAL_READDEPTH_CASES = c()
+	MEAN_TOTAL_READDEPTH_CONTROLS = c()
+	samp_class = c(rep(1,no_cases),rep(0,no_controls))
+	
+	if(is.numeric(testvardp)){
+		cat(paste("Performing Mann-Whitney test on variants where mean depth DCM and/or HVOL <",testvardp,"x...\n",sep=""))
+		}
+	else{
+		cat("Computing read depth statistics on the two cohorts...\n")	
+		}
+		
+	for(z in 1:dim(freqtable)[1]){
+
+		MEAN_TOTAL_READDEPTH_CASES = c(MEAN_TOTAL_READDEPTH_CASES,mean(as.numeric(as.character(covcases[(which(covcases[,1]==freqtable[z,1] & covcases[,2]==freqtable[z,2])),3:dim(covcases)[2]]))))
+		MEAN_TOTAL_READDEPTH_CONTROLS = c(MEAN_TOTAL_READDEPTH_CONTROLS,mean(as.numeric(as.character(covcontrols[(which(covcontrols[,1]==freqtable[z,1] & covcontrols[,2]==freqtable[z,2])),3:dim(covcontrols)[2]]))))
+
+		if(is.numeric(testvardp)){
+			if(is.na(MEAN_TOTAL_READDEPTH_CASES[z]) | is.na(MEAN_TOTAL_READDEPTH_CONTROLS[z])){
+				MW_PVALUE = c(MW_PVALUE,"Missing_info")
+				}
+			else{
+				mean_goodreads = as.numeric(freqtable[z,c("MEAN_PASSQUAL_READDEPTH_CASES","MEAN_PASSQUAL_READDEPTH_CONTROLS")])
+				mean_goodreads = subset(mean_goodreads,!is.na(mean_goodreads))
+
+				if(length(mean_goodreads) == 2){
+					if(mean_goodreads[1]<testvardp | mean_goodreads[2]<testvardp){
+						cases_index = which(as.character(vcf_cases_orig$CHROM)==as.character(freqtable[z,"CHROM"]) & as.character(vcf_cases_orig$POS)==as.character(freqtable[z,"POS"]) & as.character(vcf_cases_orig$REF)==as.character(freqtable[z,"REF"]) & as.character(vcf_cases_orig$ALT)==as.character(freqtable[z,"ALT"]))
+						rd_cases = suppressWarnings(sapply(10:dim(vcf_cases_orig)[2], function(c) sapply(cases_index, function(r) as.numeric(unlist(strsplit(as.character(vcf_cases_orig[r,c]),":"))[3],","))))
+						if(sum(is.na(rd_cases))==no_cases){
+							rd_cases = suppressWarnings(sapply(10:dim(vcf_cases_orig)[2], function(c) sapply(cases_index, function(r) as.numeric(unlist(strsplit(unlist(strsplit(as.character(vcf_cases_orig[r,c]),":"))[2],","))[1]) + as.numeric(unlist(strsplit(unlist(strsplit(as.character(vcf_cases_orig[r,c]),":"))[2],","))[2]))))
+							}
+						controls_index = which(as.character(vcf_controls_orig$CHROM)==as.character(freqtable[z,"CHROM"]) & as.character(vcf_controls_orig$POS)==as.character(freqtable[z,"POS"]) & as.character(vcf_controls_orig$REF)==as.character(freqtable[z,"REF"]) & as.character(vcf_controls_orig$ALT)==as.character(freqtable[z,"ALT"]))
+			
+						rd_controls = suppressWarnings(sapply(10:dim(vcf_controls_orig)[2], function(c) sapply(controls_index, function(r) as.numeric(unlist(strsplit(as.character(vcf_controls_orig[r,c]),":"))[3],","))))
+						if(sum(is.na(rd_controls))==no_controls){
+							rd_controls = suppressWarnings(sapply(10:dim(vcf_controls_orig)[2], function(c) sapply(controls_index, function(r) as.numeric(unlist(strsplit(unlist(strsplit(as.character(vcf_controls_orig[r,c]),":"))[2],","))[1]) + as.numeric(unlist(strsplit(unlist(strsplit(as.character(vcf_controls_orig[r,c]),":"))[2],","))[2]))))
+							}
+	
+						samp_class = c(rep(1,length(rd_cases)),rep(0,length(rd_controls)))			
+						mw_table = cbind(c(rd_cases,rd_controls),samp_class)
+						colnames(mw_table) = c("RD","CLASS")
+				
+						MW_PVALUE = (c(MW_PVALUE,wilcox.test(RD~CLASS,data=mw_table)$p.value))
+						}
+					else{
+						MW_PVALUE = c(MW_PVALUE,"Not_tested")
+						}
+					}
+				else{
+#					if(sum(mean_goodreads<testvardp)>0){
+#						dpcontrols = unlist(covcontrols[which(covcontrols[,2]==freqtable[z,2]),3:dim(covcontrols)[2]])
+#						dpcases = unlist(covcases[which(covcases[,2]==freqtable[z,2]),3:dim(covcases)[2]])
+#						dp = cbind(c(dpcases,dpcontrols),samp_class)
+#						colnames(dp) = c("dp","class")
+#						MW_PVALUE = c(MW_PVALUE,wilcox.test(dp~class,data=dp)$p.value)
+#						}
+#					else{
+#						MW_PVALUE = c(MW_PVALUE,"Not_tested")
+#						}
+					dpcontrols = unlist(covcontrols[which(covcontrols[,2]==freqtable[z,2]),3:dim(covcontrols)[2]])
+					dpcases = unlist(covcases[which(covcases[,2]==freqtable[z,2]),3:dim(covcases)[2]])
+					
+					if(mean(dpcontrols)<testvardp | mean(dpcases)<testvardp){
+						dp = cbind(c(dpcases,dpcontrols),samp_class)
+						colnames(dp) = c("dp","class")
+						MW_PVALUE = c(MW_PVALUE,wilcox.test(dp~class,data=dp)$p.value)
+						}
+					else{
+						MW_PVALUE = c(MW_PVALUE,"Not_tested")
+						}
+					}
+				}
+
+			if(z == round(dim(freqtable)[1]*0.25)){
+			cat("25% through the Mann-Whitney tests...\n")
+				}
+			else if(z == round(dim(freqtable)[1]*0.5)){
+				cat("50% through the Mann-Whitney tests...\n")
+				}
+			else if(z == round(dim(freqtable)[1]*0.75)){
+				cat("75% through the Mann-Whitney tests...\n")
+				}
+			}
+		else{
+			MW_PVALUE = c(MW_PVALUE,"Not_tested")
+			}
+		}
+
+
+	freqtable = cbind(freqtable,MEAN_TOTAL_READDEPTH_CASES,MEAN_TOTAL_READDEPTH_CONTROLS,MW_PVALUE)
+	
+	failedtest = suppressWarnings(which((as.character(freqtable$MW_PVALUE) != "Missing_info" & as.character(freqtable$MW_PVALUE) != "Not_tested" & as.numeric(as.character(freqtable$MW_PVALUE))<(0.05/dim(freqtable)[1]))))
+###	failedtest = suppressWarnings(which((as.character(freqtable$MW_PVALUE) != "Missing_info" & as.character(freqtable$MW_PVALUE) != "Not_tested" & as.numeric(as.character(freqtable$MW_PVALUE))<(0.05/1164))))
+
+	if(length(failedtest)>0){		
+		write.table(freqtable[c(failedtest),"POS"],"toremove_fromvcfs.txt",col.names=F,row.names=F,quote=F,append=T)
+		system(paste("cat temp_vcf_cases4.vcf | java -jar ",snpEff_dir,"SnpSift.jar filter --set toremove_fromvcfs.txt \"!(POS in SET[0])\" > temp_vcf_cases5.vcf",sep=""))	
+		system(paste("cat temp_vcf_controls4.vcf | java -jar ",snpEff_dir,"SnpSift.jar filter --set toremove_fromvcfs.txt \"!(POS in SET[0])\" > temp_vcf_controls5.vcf",sep=""))
+		system("rm temp_vcf_cases4.vcf temp_vcf_controls4.vcf toremove* snpEff*")
+		freqtable = suppressWarnings(freqtable[-c(failedtest),])
+		}
+	else{
+		system("mv temp_vcf_cases4.vcf temp_vcf_cases5.vcf")
+		system("mv temp_vcf_controls4.vcf temp_vcf_controls5.vcf")
+		}	
+
+#	orig_colnames_freqtable	= colnames(freqtable)
+
+	genes_burtest = readline("Now choose the gene(s) on which to perform burden testing (insert in the form x,y,...,z)\n")
+	genes_burtest = unlist(strsplit(genes_burtest,","))
+	gene_info = subset(gene_info,gene_info[,1] %in% genes_burtest)
+	
+
+	vartype = readline("Select variants of interest:\n'1'= protein altering variant types\n'2'= truncating variant types\n'3'= non-truncating protein altering variant types\n'4'= non protein altering variant types\n")
+
+	if(annottool == 1){
+
+		dbnsfp = readline("Is dbNSFP installed for annotation with SnpEff (needed for SIFT and Polyphen predictions)? (enter y or n)\n")
+		if(dbnsfp == "y"){
+			db_dir = readline("Enter full path of directory containing dbNSFP files:\n")
+			cat("Annotating VCFs of cases and controls with dbNSFP (mainly to get SIFT and Polyphen predictions)...\n\n")
+			system(paste("java -jar ",snpEff_dir,"SnpSift.jar dbnsfp -db ",db_dir,"dbNSFP2.7.txt.gz -q -v temp_vcf_cases5.vcf > temp_vcf_cases5b.vcf",sep=""))			
+			system(paste("java -jar ",snpEff_dir,"SnpSift.jar dbnsfp -db ",db_dir,"dbNSFP2.7.txt.gz -q -v temp_vcf_controls5.vcf > temp_vcf_controls5b.vcf",sep=""))
+			system("mv temp_vcf_cases5b.vcf temp_vcf_cases5.vcf")
+			system("mv temp_vcf_controls5b.vcf temp_vcf_controls5.vcf")
+			}
+		else{
+			sift_pred = rep(NA,dim(freqtable)[1])
+			polyph_pred = rep(NA,dim(freqtable)[1])
+			}
+
+		genes_snpeffstring = ""
+		for(k in 1:dim(gene_info)[1]){
+			genes_snpeffstring = paste(genes_snpeffstring,paste("|((CHROM='",gene_info[k,2],"')&(POS>",gene_info[k,3],")&(POS<",gene_info[k,4],"))",sep=""),sep="")
+			}
+		genes_snpeffstring = substring(genes_snpeffstring,2)
+
+		if(vartype == 1){
+			system(paste("cat temp_vcf_cases5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].IMPACT='HIGH' | EFF[*].IMPACT='MODERATE')&",genes_snpeffstring,"\" > Filtered_VCF_cases.vcf",sep=""))
+			system(paste("cat temp_vcf_controls5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].IMPACT='HIGH' | EFF[*].IMPACT='MODERATE')&",genes_snpeffstring,"\" > Filtered_VCF_controls.vcf",sep=""))
+			}
+		else if(vartype == 2){
+			system(paste("cat temp_vcf_cases5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].IMPACT='HIGH')&",genes_snpeffstring,"\" > Filtered_VCF_cases.vcf",sep=""))
+			system(paste("cat temp_vcf_controls5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].IMPACT='HIGH')&",genes_snpeffstring,"\" > Filtered_VCF_controls.vcf",sep=""))
+			}
+		else if(vartype == 3){
+			system(paste("cat temp_vcf_cases5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].IMPACT='MODERATE')&",genes_snpeffstring,"\" > Filtered_VCF_cases.vcf",sep=""))
+			system(paste("cat temp_vcf_controls5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].IMPACT='MODERATE')&",genes_snpeffstring,"\" > Filtered_VCF_controls.vcf",sep=""))
+			}
+		else if(vartype == 4){
+			system(paste("cat temp_vcf_cases5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].IMPACT='LOW')&",genes_snpeffstring,"\" > Filtered_VCF_cases.vcf",sep=""))
+			system(paste("cat temp_vcf_controls5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].IMPACT='LOW')&",genes_snpeffstring,"\" > Filtered_VCF_controls.vcf",sep=""))
+
+#			system(paste("cat temp_vcf_cases5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].EFFECT='synonymous_variant')&",genes_snpeffstring,"\" > temp_vcf_cases6.vcf",sep=""))
+#			system(paste("cat temp_vcf_controls5.vcf | java -jar ~/snpEff/SnpSift.jar filter \"(EFF[*].EFFECT='synonymous_variant')&",genes_snpeffstring,"\" > temp_vcf_controls6.vcf",sep=""))
+			}
+		else{
+			stop("The type of variation must be indicated as 1,2,3 or 4\n")
+			}
+		system("rm temp_vcf_cases5.vcf temp_vcf_controls5.vcf snpEff*")
+		}
+	else{
+		if(length(genes_burtest)==1){
+			genes_vepstring = paste("SYMBOL is",genes_burtest,sep=" ")
+			}
+		else{
+			genes_vepstring = paste("SYMBOL in",paste(genes_burtest,collapse=","),sep=" ")
+			}
+
+		if(vartype == 1){
+			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_cases5.vcf -o Filtered_VCF_cases.vcf -format vcf --filter \"",genes_vepstring," and IMPACT in HIGH,MODERATE\"",sep=""))
+			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_controls5.vcf -o Filtered_VCF_controls.vcf -format vcf --filter \"",genes_vepstring," and IMPACT in HIGH,MODERATE\"",sep=""))
+			}
+		else if(vartype == 2){
+			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_cases5.vcf -o Filtered_VCF_cases.vcf -format vcf --filter \"",genes_vepstring," and IMPACT is HIGH\"",sep=""))
+			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_controls5.vcf -o Filtered_VCF_controls.vcf -format vcf --filter \"",genes_vepstring," and IMPACT is HIGH\"",sep=""))
+			}
+		else if(vartype == 3){
+			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_cases5.vcf -o Filtered_VCF_cases.vcf -format vcf --filter \"",genes_vepstring," and IMPACT is MODERATE\"",sep=""))
+			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_controls5.vcf -o Filtered_VCF_controls.vcf -format vcf --filter \"",genes_vepstring," and IMPACT is MODERATE\"",sep=""))
+			}
+		else if(vartype == 4){
+			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_cases5.vcf -o Filtered_VCF_cases.vcf -format vcf --filter \"",genes_vepstring," and IMPACT is LOW\"",sep=""))
+			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_controls5.vcf -o Filtered_VCF_controls.vcf -format vcf --filter \"",genes_vepstring," and IMPACT is LOW\"",sep=""))
+
+#			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_cases5.vcf -o temp_vcf_cases6.vcf -format vcf --filter \"",genes_vepstring," and Consequence is synonymous_variant\"",sep=""))
+#			system(paste("filter_vep.pl --force_overwrite -i temp_vcf_controls5.vcf -o temp_vcf_controls6.vcf -format vcf --filter \"",genes_vepstring," and Consequence is synonymous_variant\"",sep=""))
+			}
+		else{
+			stop("The type of variation must be indicated as 1,2,3 or 4\n")
+			}
+		system("rm temp_vcf_cases5.vcf temp_vcf_controls5.vcf")
+		}
+
+	vcf_cases = read.table("Filtered_VCF_cases.vcf",header=F,colClasses=c("character"))
+	colnames(vcf_cases) = unlist(strsplit(gsub("#","",system(paste("awk '/#CHROM/' ",gsub(" ","\\\\ ",'Filtered_VCF_cases.vcf'),collapse=""),intern=T)),"\t"))
+	vcf_controls = read.table("Filtered_VCF_controls.vcf",header=F,colClasses=c("character"))
+	colnames(vcf_controls) = unlist(strsplit(gsub("#","",system(paste("awk '/#CHROM/' ",gsub(" ","\\\\ ",'Filtered_VCF_controls.vcf'),collapse=""),intern=T)),"\t"))
+		
+	vcfcombined = merge(vcf_cases,vcf_controls,by=c("CHROM","POS","REF","ALT"),all=T)
+	
+	if(annottool == 1){
+		conseq_x = sapply(1:dim(vcfcombined)[1],function(x) subset(unlist(strsplit(as.character(vcfcombined[x,"INFO.x"]),";")),grepl("EFF=",unlist(strsplit(as.character(vcfcombined[x,"INFO.x"]),";")))))
+		conseq_y = sapply(1:dim(vcfcombined)[1],function(x) subset(unlist(strsplit(as.character(vcfcombined[x,"INFO.y"]),";")),grepl("EFF=",unlist(strsplit(as.character(vcfcombined[x,"INFO.y"]),";")))))
+		effect_x = sapply(conseq_x,function(y) unlist(strsplit(as.character(gsub("EFF=","",y)),"\\("))[1])
+		effect_y = sapply(conseq_y,function(y) unlist(strsplit(as.character(gsub("EFF=","",y)),"\\("))[1])
+		effect = unlist(lapply(mapply(c,effect_x,effect_y),`[[`,1))
+		ens_transcr_x = sapply(sapply(conseq_x,function(y) unlist(strsplit(as.character(gsub("EFF=","",y)),"\\("))[2]), function(z) subset(unlist(strsplit(as.character(z),"\\|")),grepl("ENST",unlist(strsplit(as.character(z),"\\|")))))
+		ens_transcr_y = sapply(sapply(conseq_y,function(y) unlist(strsplit(as.character(gsub("EFF=","",y)),"\\("))[2]), function(z) subset(unlist(strsplit(as.character(z),"\\|")),grepl("ENST",unlist(strsplit(as.character(z),"\\|")))))
+		ens_transcr = unlist(lapply(mapply(c,ens_transcr_x,ens_transcr_y),`[[`,1))
+		cdna_change_x = sapply(sapply(conseq_x,function(y) unlist(strsplit(as.character(gsub("EFF=","",y)),"\\("))[2]), function(z) unlist(strsplit(as.character(z),"\\|"))[3])
+		cdna_change_y = sapply(sapply(conseq_y,function(y) unlist(strsplit(as.character(gsub("EFF=","",y)),"\\("))[2]), function(z) unlist(strsplit(as.character(z),"\\|"))[3])
+		cdna_change = unlist(lapply(mapply(c,cdna_change_x,cdna_change_y),`[[`,1))
+		prot_change_x = sapply(sapply(conseq_x,function(y) unlist(strsplit(as.character(gsub("EFF=","",y)),"\\("))[2]), function(z) unlist(strsplit(as.character(z),"\\|"))[4])
+		prot_change_y = sapply(sapply(conseq_y,function(y) unlist(strsplit(as.character(gsub("EFF=","",y)),"\\("))[2]), function(z) unlist(strsplit(as.character(z),"\\|"))[4])
+		prot_change = unlist(lapply(mapply(c,prot_change_x,prot_change_y),`[[`,1))
+		sift_pred_x = gsub("dbNSFP_SIFT_pred=","",sapply(1:dim(vcfcombined)[1],function(x) subset(unlist(strsplit(as.character(vcfcombined[x,"INFO.x"]),";")),grepl("dbNSFP_SIFT",unlist(strsplit(as.character(vcfcombined[x,"INFO.x"]),";"))))))
+		sift_pred_y = gsub("dbNSFP_SIFT_pred=","",sapply(1:dim(vcfcombined)[1],function(x) subset(unlist(strsplit(as.character(vcfcombined[x,"INFO.y"]),";")),grepl("dbNSFP_SIFT",unlist(strsplit(as.character(vcfcombined[x,"INFO.y"]),";"))))))
+		sift_pred_x = as.list(sift_pred_x)
+		sift_pred_y = as.list(sift_pred_y)
+		sift_pred_x[which(sift_pred_x == "character(0)" & sift_pred_y == "character(0)")] = ""
+		sift_pred_y[which(sift_pred_x == "character(0)" & sift_pred_y == "character(0)")] = ""
+		sift_pred_x[which(sift_pred_x == "character(0)")] = list(NULL)
+		sift_pred_y[which(sift_pred_y == "character(0)")] = list(NULL)
+		sift_pred = unlist(lapply(mapply(c,sift_pred_x,sift_pred_y),`[[`,1))
+		sift_pred = sapply(sift_pred, function(x) unlist(strsplit(as.character(x),","))[1])
+		sift_pred[which(is.na(sift_pred))] = ""
+		polyph_pred_x = gsub("dbNSFP_Polyphen2_HDIV_pred=","",sapply(1:dim(vcfcombined)[1],function(x) subset(unlist(strsplit(as.character(vcfcombined[x,"INFO.x"]),";")),grepl("dbNSFP_Polyphen2_HDIV",unlist(strsplit(as.character(vcfcombined[x,"INFO.x"]),";"))))))
+		polyph_pred_y = gsub("dbNSFP_Polyphen2_HDIV_pred=","",sapply(1:dim(vcfcombined)[1],function(x) subset(unlist(strsplit(as.character(vcfcombined[x,"INFO.y"]),";")),grepl("dbNSFP_Polyphen2_HDIV",unlist(strsplit(as.character(vcfcombined[x,"INFO.y"]),";"))))))
+		polyph_pred_x = as.list(polyph_pred_x)
+		polyph_pred_y = as.list(polyph_pred_y)
+		polyph_pred_x[which(polyph_pred_x == "character(0)" & polyph_pred_y == "character(0)")] = ""
+		polyph_pred_y[which(polyph_pred_x == "character(0)" & polyph_pred_y == "character(0)")] = ""
+		polyph_pred_x[which(polyph_pred_x == "character(0)")] = list(NULL)
+		polyph_pred_y[which(polyph_pred_y == "character(0)")] = list(NULL)
+		polyph_pred = unlist(lapply(mapply(c,polyph_pred_x,polyph_pred_y),`[[`,1))
+		polyph_pred = sapply(polyph_pred, function(x) unlist(strsplit(as.character(x),","))[1])
+		polyph_pred[which(is.na(polyph_pred))] = ""
+		}
+	else{
+		conseq_x = sapply(1:dim(vcfcombined)[1],function(x) subset(unlist(strsplit(as.character(vcfcombined[x,"INFO.x"]),";")),grepl("CSQ=",unlist(strsplit(as.character(vcfcombined[x,"INFO.x"]),";")))))
+		conseq_y = sapply(1:dim(vcfcombined)[1],function(x) subset(unlist(strsplit(as.character(vcfcombined[x,"INFO.y"]),";")),grepl("CSQ=",unlist(strsplit(as.character(vcfcombined[x,"INFO.y"]),";")))))		
+		effect_x = sapply(conseq_x,function(y) unlist(strsplit(as.character(y),"\\|"))[2])
+		effect_y = sapply(conseq_y,function(y) unlist(strsplit(as.character(y),"\\|"))[2])
+		effect = unlist(lapply(mapply(c,effect_x,effect_y),`[[`,1))
+		ens_transcr_x = sapply(conseq_x,function(y) subset(unlist(strsplit(as.character(y),"\\|")),grepl("ENST",unlist(strsplit(as.character(y),"\\|")))))
+		ens_transcr_y = sapply(conseq_y,function(y) subset(unlist(strsplit(as.character(y),"\\|")),grepl("ENST",unlist(strsplit(as.character(y),"\\|")))))
+		ens_transcr = unlist(lapply(mapply(c,ens_transcr_x,ens_transcr_y),`[[`,1))
+		cdna_change_x = sapply(conseq_x,function(y) unlist(strsplit(as.character(y),"\\|"))[17])
+		cdna_change_y = sapply(conseq_y,function(y) unlist(strsplit(as.character(y),"\\|"))[17])
+		cdna_change = unlist(lapply(mapply(c,cdna_change_x,cdna_change_y),`[[`,1))
+		prot_change_x_1 = sapply(conseq_x,function(y) unlist(strsplit(as.character(y),"\\|"))[15])
+		prot_change_y_1 = sapply(conseq_y,function(y) unlist(strsplit(as.character(y),"\\|"))[15])
+		prot_change_1 = unlist(lapply(mapply(c,prot_change_x_1,prot_change_y_1),`[[`,1))
+		prot_change_x_2 = sapply(conseq_x,function(y) unlist(strsplit(as.character(y),"\\|"))[16])
+		prot_change_y_2 = sapply(conseq_y,function(y) unlist(strsplit(as.character(y),"\\|"))[16])
+		prot_change_2 = unlist(lapply(mapply(c,prot_change_x_2,prot_change_y_2),`[[`,1))
+		prot_change = paste(prot_change_1,prot_change_2,sep="|")
+		sift_pred_x = sapply(conseq_x,function(y) unlist(strsplit(as.character(y),"\\|"))[24])
+		sift_pred_y = sapply(conseq_y,function(y) unlist(strsplit(as.character(y),"\\|"))[24])
+		sift_pred = unlist(lapply(mapply(c,sift_pred_x,sift_pred_y),`[[`,1))
+		sift_pred[which(is.na(sift_pred))] = ""
+		polyph_pred_x = sapply(conseq_x,function(y) unlist(strsplit(as.character(y),"\\|"))[25])
+		polyph_pred_y = sapply(conseq_y,function(y) unlist(strsplit(as.character(y),"\\|"))[25])
+		polyph_pred = unlist(lapply(mapply(c,polyph_pred_x,polyph_pred_y),`[[`,1))
+		polyph_pred[which(is.na(polyph_pred))] = ""
+		}
+	
+
+	vcfcombined = vcfcombined[,c("CHROM","POS","REF","ALT")]
+	vcfcombined = cbind(vcfcombined,effect,ens_transcr,cdna_change,prot_change,sift_pred,polyph_pred)
+	colnames(vcfcombined) = c("CHROM","POS","REF","ALT","EFFECT","TRANSCR_ID","CDNA_CHANGE","PROT_CHANGE","SIFT_PRED","POLYPHEN_HDIV_PRED")
+
+	freqtable = subset(freqtable,freqtable$GENE %in% genes_burtest)
+	
+	orig_colnames_freqtable	= c(colnames(freqtable),"EFFECT","TRANSCR_ID","CDNA_CHANGE","PROT_CHANGE","SIFT_PRED","POLYPHEN_HDIV_PRED")
+	
+	freqtable = merge(vcfcombined,freqtable,by=c("CHROM","POS","REF","ALT"),all.x=T)
+	freqtable = freqtable[,c(orig_colnames_freqtable)]
+	freqtable = freqtable[,c(1:5,39:44,6:38)]	
+
+	freq_cutoff = readline(paste("Choose maximum allele number in ",refcoh_flag,":\n",sep=""))
+	freq_cutoff = as.numeric(unlist(strsplit(freq_cutoff,",")))
+
+	for(fc in 1:length(freq_cutoff)){
+
+		fc_flag = paste("_Max",as.character(freq_cutoff[fc]),"_",sep="")
+
+		freqtable_copy = freqtable
+
+		if(refcohort == 1){
+			freqtable_copy = subset(freqtable_copy,(freqtable_copy[,"var_EXAC_allcount"] <= freq_cutoff[fc]))
+			}
+		else{
+			freqtable_copy = subset(freqtable_copy,(freqtable_copy[,"var_ESP_allcount"] + freqtable_copy[,"var_1KG_allcount"] <= freq_cutoff[fc]))
+			}
+
+		CARRIERS_CASES = c()
+		CARRIERS_CONTROLS = c()
+			
+		for(x in 1:dim(freqtable_copy)[1]){
+
+			vcf_index_cases = which(vcf_cases$CHROM==freqtable_copy[x,"CHROM"] & vcf_cases$POS==freqtable_copy[x,"POS"] & vcf_cases$REF==freqtable_copy[x,"REF"] & vcf_cases$ALT==freqtable_copy[x,"ALT"])
+			vcf_index_controls = which(vcf_controls$CHROM==freqtable_copy[x,"CHROM"] & vcf_controls$POS==freqtable_copy[x,"POS"] & vcf_controls$REF==freqtable_copy[x,"REF"] & vcf_controls$ALT==freqtable_copy[x,"ALT"])		
+
+			if(length(vcf_index_cases)==1){
+				cases_vect = sapply(vcf_cases[vcf_index_cases,10:dim(vcf_cases)[2]], function(y) substr(as.character(y),1,3) != "0/0" & substr(as.character(y),1,3) != "./.")
+				if(is.numeric(minvardp)){
+					cov_vect_cases = suppressWarnings(sapply(vcf_cases[vcf_index_cases,10:dim(vcf_cases)[2]], function(y) as.numeric(unlist(strsplit(as.character(y),":"))[3])))
+					cov_vect_cases[which(is.na(cov_vect_cases))] = as.numeric(unlist(strsplit(as.character(unlist(strsplit(as.character(vcf_cases[vcf_index_cases,(which(is.na(cov_vect_cases))+9)]),":"))[2]),","))[1]) + as.numeric(unlist(strsplit(as.character(unlist(strsplit(as.character(vcf_cases[vcf_index_cases,(which(is.na(cov_vect_cases))+9)]),":"))[2]),","))[2])
+					cov_todump_cases = cov_vect_cases>=minvardp
+					cases_ids = colnames(vcf_cases[,10:dim(vcf_cases)[2]])[as.logical(cases_vect & cov_todump_cases)]
+					}
+				else{
+					cases_ids = colnames(vcf_cases[,10:dim(vcf_cases)[2]])[as.logical(cases_vect)]
+					}
+				}
+			else{
+				cases_ids = "-"
+				}
+
+			if(length(vcf_index_controls)==1){
+				controls_vect = sapply(vcf_controls[vcf_index_controls,10:dim(vcf_controls)[2]], function(y) substr(as.character(y),1,3) != "0/0" & substr(as.character(y),1,3) != "./.")
+				if(is.numeric(minvardp)){
+					cov_vect_controls = suppressWarnings(sapply(vcf_controls[vcf_index_controls,10:dim(vcf_controls)[2]], function(y) as.numeric(unlist(strsplit(as.character(y),":"))[3])))
+					cov_vect_controls[which(is.na(cov_vect_controls))] = as.numeric(unlist(strsplit(as.character(unlist(strsplit(as.character(vcf_controls[vcf_index_controls,(which(is.na(cov_vect_controls))+9)]),":"))[2]),","))[1]) + as.numeric(unlist(strsplit(as.character(unlist(strsplit(as.character(vcf_controls[vcf_index_controls,(which(is.na(cov_vect_controls))+9)]),":"))[2]),","))[2])
+					cov_todump_controls = cov_vect_controls>=minvardp
+					controls_ids = colnames(vcf_controls[,10:dim(vcf_controls)[2]])[as.logical(controls_vect & cov_todump_controls)]
+					}
+				else{
+					controls_ids = colnames(vcf_controls[,10:dim(vcf_controls)[2]])[as.logical(controls_vect)]
+					}
+				}
+			else{
+				controls_ids = "-"
+				}
+					
+			CARRIERS_CASES = c(CARRIERS_CASES,paste(cases_ids,collapse=","))	
+			CARRIERS_CONTROLS = c(CARRIERS_CONTROLS,paste(controls_ids,collapse=","))
+			}
+
+		freqtable_copy = cbind(freqtable_copy,CARRIERS_CASES,CARRIERS_CONTROLS)
+		freqtable_copy[,"CARRIERS_CASES"] = as.character(freqtable_copy[,"CARRIERS_CASES"])
+		freqtable_copy[which(freqtable_copy[,"CARRIERS_CASES"]==""),"CARRIERS_CASES"] = "-"
+		
+		write.table(freqtable_copy,paste("FreqTable",fc_flag,"_",refcoh_flag,".txt",sep=""),col.names=T,row.names=F,quote=F,sep="\t")
+
+		all_cases = unique(unlist(strsplit(gsub("-","",paste(as.character(freqtable_copy[,"CARRIERS_CASES"]),collapse=",")),",")))
+		all_controls = unique(unlist(strsplit(gsub("-","",paste(as.character(freqtable_copy[,"CARRIERS_CONTROLS"]),collapse=",")),",")))
+		all_cases = subset(all_cases,all_cases!="")
+		all_controls = subset(all_controls,all_controls!="")
+
+#		cat(paste("RESULTS: ",length(all_cases),"/",no_cases," DCM vs ",length(all_controls),"/",no_controls," HVOL\n"))
+		mat = matrix(c(length(all_cases),no_cases-length(all_cases),length(all_controls),no_controls-length(all_controls)),ncol=2)
+		ft_onetailed = fisher.test(mat,alternative="g")$p.value
+		ft_twotailed = fisher.test(mat)$p.value
+		lr = ((length(all_cases)/no_cases)-(length(all_controls)/no_controls))/(length(all_cases)/no_cases)
+		eb = ((length(all_cases)/no_cases)-(length(all_controls)/no_controls))*100
+		cat(paste("FREQUENCY RANGE IN POPULATION (%): Max ",freq_cutoff[fc]," observations in ",refcoh_flag,"\nBurden in cases: ",length(all_cases),"/",no_cases,"\nBurden in controls: ",length(all_controls),"/",no_controls,"\np-value for ONE-TAILED Fisher exact test: ",ft_onetailed,"\np-value for TWO-TAILED Fisher exact test: ",ft_twotailed,"\nLikelihood ratio: ",lr,"\nExcess burden in disease (%):",eb,"\n\n\n",sep=""))	
+		}		
+}

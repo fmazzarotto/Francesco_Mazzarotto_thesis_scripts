@@ -1,0 +1,103 @@
+###inputs required: multi-sample VCF file with data from the 514 HVOL + 5 family members analysed in my thesis (chapter 3).
+###The script trims the VCF to keep only variants with genotypes compatible with the autosomal recessive inheritance model
+###with compound heterozygosity, but based on reference:alternative reads ratio instead of genotype calls made by GATK.
+
+comp_het_allbal <- function(filename){
+
+	cat("Extracting genes where variants are...\n")
+	system(paste("java -jar /home/fmazzaro/snpEff/SnpSift.jar extractFields -s \",\" ",filename," \"EFF[*].GENE\" > genes_list",sep=""))
+	genes = as.character(read.table("genes_list")[,1])
+	genes = sapply(unname(sapply(genes,function(x) unique(unlist(strsplit(x, ","))))),function(x) paste(x,collapse=","))
+
+	cat("Importing vcf...\n")
+	vcf = read.table(filename)
+
+
+	ifelse_allbal_comphet_proband <- function(k) #must be het so within 85:15
+		suppressWarnings(ifelse((substr(as.character(k),1,3) == "0/0") & (unlist(strsplit(as.character(k),":"))[2]=="." | !(grepl(",",unlist(strsplit(as.character(k),":"))[2]))),FALSE, #exclude if 100% reads are ref
+			ifelse((unlist(strsplit(as.character(k),":"))[2]=="." | !(grepl(",",unlist(strsplit(as.character(k),":"))[2]))),TRUE,	#'or' condition needed for variants with ./. but 0 instead of . in number of reads
+				ifelse(as.numeric(unlist(strsplit(unlist(strsplit(as.character(k),":"))[2],","))[1])==0 & as.numeric(unlist(strsplit(unlist(strsplit(as.character(k),":"))[2],","))[2])==0,TRUE,
+					ifelse(((as.numeric(unlist(strsplit(unlist(strsplit(as.character(k),":"))[2],","))[2])/
+					(as.numeric(unlist(strsplit(unlist(strsplit(as.character(k),":"))[2],","))[1])+
+					as.numeric(unlist(strsplit(unlist(strsplit(as.character(k),":"))[2],","))[2])) >= 0.15) & 
+					(as.numeric(unlist(strsplit(unlist(strsplit(as.character(k),":"))[2],","))[2])/
+					(as.numeric(unlist(strsplit(unlist(strsplit(as.character(k),":"))[2],","))[1])+
+					as.numeric(unlist(strsplit(unlist(strsplit(as.character(k),":"))[2],","))[2])) <= 0.85)),TRUE,FALSE)))))
+	
+	cat("Working on proband...\n")
+	proband_ab = sapply(vcf[,526],ifelse_allbal_comphet_proband)
+
+	ifelse_homalt_parents_siblings <- function(y)	#marks as FALSE the homalt in parents and siblings
+		suppressWarnings(ifelse(unlist(strsplit(as.character(y),":"))[2]=="." | !(grepl(":",as.character(y))),TRUE, #the second condition is needed for the variants with only ./. indicated, without any other field
+			ifelse((substr(as.character(y),1,3) == "0/0" | substr(as.character(y),1,3) == "./.") & (unlist(strsplit(as.character(y),":"))[2]=="." | !(grepl(",",unlist(strsplit(as.character(y),":"))[2]))),TRUE,
+				ifelse(as.numeric(unlist(strsplit(unlist(strsplit(as.character(y),":"))[2],","))[1])==0 & as.numeric(unlist(strsplit(unlist(strsplit(as.character(y),":"))[2],","))[2])==0,TRUE,
+					ifelse((as.numeric(unlist(strsplit(unlist(strsplit(as.character(y),":"))[2],","))[2])/
+					(as.numeric(unlist(strsplit(unlist(strsplit(as.character(y),":"))[2],","))[1])+
+					as.numeric(unlist(strsplit(unlist(strsplit(as.character(y),":"))[2],","))[2])) >= 0.85),FALSE,TRUE)))))
+
+
+	ifelse_homref_parents <- function(z)	#marks as TRUE the homref in parents
+		suppressWarnings(ifelse(unlist(strsplit(as.character(z),":"))[2]==".",FALSE,
+			ifelse((substr(as.character(z),1,3) == "0/0") & (unlist(strsplit(as.character(z),":"))[2]=="." | !(grepl(",",unlist(strsplit(as.character(z),":"))[2]))),TRUE,
+				ifelse(as.numeric(unlist(strsplit(unlist(strsplit(as.character(z),":"))[2],","))[1])==0 & as.numeric(unlist(strsplit(unlist(strsplit(as.character(z),":"))[2],","))[2])==0,FALSE,
+					ifelse((as.numeric(unlist(strsplit(unlist(strsplit(as.character(z),":"))[2],","))[2])/
+					(as.numeric(unlist(strsplit(unlist(strsplit(as.character(z),":"))[2],","))[1])+
+					as.numeric(unlist(strsplit(unlist(strsplit(as.character(z),":"))[2],","))[2])) <= 0.15),TRUE,FALSE)))))
+
+
+	ifelse_het_parents <- function(w)	#marks as TRUE the het in parents
+		suppressWarnings(ifelse(unlist(strsplit(as.character(w),":"))[2]==".",FALSE,
+			ifelse((substr(as.character(w),1,3) == "0/0") & (unlist(strsplit(as.character(w),":"))[2]=="." | !(grepl(",",unlist(strsplit(as.character(w),":"))[2]))),FALSE,
+				ifelse(as.numeric(unlist(strsplit(unlist(strsplit(as.character(w),":"))[2],","))[1])==0 & as.numeric(unlist(strsplit(unlist(strsplit(as.character(w),":"))[2],","))[2])==0,FALSE,
+					ifelse(((as.numeric(unlist(strsplit(unlist(strsplit(as.character(w),":"))[2],","))[2])/
+					(as.numeric(unlist(strsplit(unlist(strsplit(as.character(w),":"))[2],","))[1])+
+					as.numeric(unlist(strsplit(unlist(strsplit(as.character(w),":"))[2],","))[2])) >= 0.15) & 
+					(as.numeric(unlist(strsplit(unlist(strsplit(as.character(w),":"))[2],","))[2])/
+					(as.numeric(unlist(strsplit(unlist(strsplit(as.character(w),":"))[2],","))[1])+
+					as.numeric(unlist(strsplit(unlist(strsplit(as.character(w),":"))[2],","))[2])) <= 0.85)),TRUE,FALSE)))))
+
+	
+
+	cat("Working on homalt genotypes in parents and siblings...\n")
+	for(q in c(524,525,527,528)){
+		samp_ab = sapply(vcf[,q],ifelse_homalt_parents_siblings)
+		if(q==524){
+			tokeep = proband_ab & samp_ab #must be TRUE in proband (=het) and TRUE in parents and siblings (=not 1/1)
+			}
+		else{
+			tokeep = samp_ab & tokeep
+			}
+		}
+
+	cat("Working on homref genotypes in parents...\n")
+	parent1_homref = sapply(vcf[,524],ifelse_homref_parents)	#parents cannot be both homref
+	parent2_homref = sapply(vcf[,525],ifelse_homref_parents)
+	parents_homref = !(parent1_homref & parent2_homref)
+	tokeep = tokeep & parents_homref
+
+	cat("Working on het genotypes in parents...\n")
+	parent1_het = sapply(vcf[,524],ifelse_het_parents)	#parents cannot be both het
+	parent2_het = sapply(vcf[,525],ifelse_het_parents)
+	parents_het = !(parent1_het & parent2_het)
+	tokeep = tokeep & parents_het
+
+
+	vcf = vcf[as.logical(tokeep),]
+	genes = genes[as.logical(tokeep)]
+	
+	cat(paste(dim(vcf)[1]," variants left after the filtering...\n",sep=""))
+
+	dup_genes = genes[as.logical(duplicated(genes))]	#keep only variants in genes with >1 variant
+	vcf = vcf[as.logical(genes %in% dup_genes),]
+	genes = subset(genes, genes %in% dup_genes)
+	vcf = cbind(vcf,genes)
+
+	nocalls = sapply(1:dim(vcf)[1],function(j) sum(sapply(524:528, function(h) unlist(strsplit(as.character(vcf[j,h]),":"))[1])=="./."))	#counts no-calls in the family for each variant
+#	nocalls = sapply(1:dim(vcf)[1],function(l) substr(as.character(vcf[l,526]),1,3)!="./.")	#TRUE if no-call in proband for each variant
+	vcf = vcf[as.logical(nocalls<2),]	#keep only variants with a call in the proband
+
+	cat(paste("...of which ",dim(vcf)[1]," altering ",length(unique(vcf[,529]))," genes at >1 position (max 1 no-call allowed in family members)...\n",sep=""))
+	
+	write.table(vcf,"Compound_het_relaxed_max1nocall.vcf",col.names=T,row.names=F,quote=F,sep="\t")
+
+}

@@ -1,0 +1,1391 @@
+###Inputs needed: table of cases variants (as an R dataframe), table of controls variants (as an R dataframe), 
+###path of directory where to save 1KG vcf sections,
+###path of directory containing ESP VCF files (as they are not accessible via ftp), 
+###path of directory containing ESP coverage files,
+###The script requires tabix to be installed, besides R packages "biomaRt",
+###"HardyWeinberg".
+
+
+burden_test <- function(vars,controls_set,OneKG_vcf_dir="./1KG files/",ESP_vcf_dir="./ESP variants/ESP vcf/",ESP_cov_dir="./ESP variants/ESP cov/"){
+
+	cat("WARNING: if the directory containing ESP vcf files is different from './ESP variants/ESP vcf' specify ESP_vcf_dir=path in the inputs\n")
+	cat("WARNING: if the directory containing ESP coverage files is different from './ESP variants/ESP cov' specify ESP_cov_dir=path in the inputs\n")
+	cat("WARNING: only variants affecting at least one protein-coding transcript are considered\n\n")	
+	
+	genes = readline("Choose the gene(s) to consider for burden testing (insert in the form x,y,...,z) or type 'all' for all genes in the two sets:")
+	if(genes == "all" | genes == "ALL"){
+		genes = paste(unique(c(as.character(unique(vars[,"Gene"])),as.character(unique(controls_set[,"Gene"])))),collapse=",")
+		}
+	genes = unlist(strsplit(genes,","))
+	if(length(genes)>1){
+		#CHOOSE 1 FOR SINGLE GENE, 2 FOR GENE PAIRS ETC.
+		n_of_genes = readline("In how many genes do you want to check for variation? (1=min.1, 2=min.2 etc OR only1=1 gene only, only2=2 genes only etc):\n")
+		if(!grepl("only",n_of_genes)){
+			specific_n_genes = F
+			if(n_of_genes==1){
+				n_of_genes_label = "_AllVariation"
+				}
+			else if (n_of_genes==2){
+				n_of_genes_label = "_MultipleGenes"
+				}
+			else{
+				n_of_genes_label = paste("_",n_of_genes,"orMoreGenes",sep="")
+				}
+			}
+		else{
+			specific_n_genes = T
+			n_of_genes_label = paste("_",n_of_genes,"Gene(s)",sep="")
+			n_of_genes = as.numeric(substr(n_of_genes,5,10000))
+			}
+		}
+	else{
+		specific_n_genes = F
+		n_of_genes = 1
+		n_of_genes_label = ""
+		}
+	
+	#VECTOR WITH ALL THE VALID ENSEMBL VARIANT CONSEQUENCES ON TRANSCRIPTS
+	var_classes = c("upstream_gene_variant","missense_variant","intron_variant","non_coding_exon_variant","nc_transcript_variant","downstream_gene_variant",
+	"synonymous_variant","5_prime_UTR_variant","3_prime_UTR_variant","splice_region_variant","feature_elongation","splice_donor_variant","splice_acceptor_variant",
+	"coding_sequence_variant","feature_truncation","inframe_deletion","inframe_insertion","frameshift_variant","transcript_ablation","stop_gained","stop_lost","initiator_codon_variant",		
+	"transcript_amplification","incomplete_terminal_codon_variant","stop_retained_variant","mature_miRNA_variant","NMD_transcript_variant","TFBS_ablation",
+	"TFBS_amplification","TF_binding_site_variant","regulatory_region_variant","regulatory_region_ablation","regulatory_region_amplification","intergenic_variant")
+													
+	cat("POSSIBLE CATEGORIES FOR CUSTOM SET:\n")				
+	print(var_classes)
+	cat("\n")
+	
+	#SELECT VARIANT TYPES OF INTEREST
+	#1=MISSENSE,STOPLOSS,STOPGAIN,INFR_INDELS,FRAMESHIFT,ESS_SPLICE
+	#2=ESS_SPLICE,FRAMESHIFT,STOPLOSS,STOPGAIN
+	#3=MISSENSE,INFR_INDELS
+	#4=SYNONYM,INTRON,UTR,NC_EXON,NC_TRANSCRIPT,UPSTREAM,DOWNSTREAM,NC_REGION,OTH_SPLICE
+	regions = readline("Select variants:\n'1'= protein altering variant types\n'2'= truncating variant types\n'3'= non-truncating protein altering variant types\n'4'= non protein altering variant types\nOr insert a custom subset in the form x,y,z...\nOr type 'all' for all variants\n")
+	
+	#SELECT FREQUENCY RANGE(S) TO BE CONSIDERED IN ESP AND 1KG
+	thres = readline("Enter one or more freq thresholds (%) in ESP/1KG in the form X-Y (0-0 = novel)\nand/or e.g.'max1' to allow one allele in ESP/1KG\nand/or e.g. '4all' to select vars observed 4 times in ESP/1KG(comma sep.):\n")
+	thres = unlist(strsplit(thres,","))
+
+	#SELECT WHETHER TO ANALYZE ONLY CAUCASIAN SAMPLES IN 1KG (EUR) AND ESP (EUROPEAN-AMERICANS)
+	cauc = readline("Would you like to analyze only caucasian sub-populations in ESP and 1000 Genomes? (y/n)\n")
+	if(cauc == "y" | cauc == "Y"){
+		ethn_flag = "_cauc"
+		}
+	else{
+		ethn_flag = ""
+		}
+
+	#CHOOSE WHETHER TO EXCLUDE VARIANTS PREDICTED AS NEUTRAL BY BOTH SIFT AND POLYPHEN
+	siftpol = readline("Would you like to exclude variants predicted as 'benign' in all transcripts by both SIFT and Polyphen? (y/n)\n")
+
+	#CHOOSE WHETHER TO EXCLUDE VARIANTS SHARED BETWEEN CASES AND CONTROLS
+	shrd_vars = readline("Would you like to exclude variants shared between cases and controls? (y/n)\n")
+	if(shrd_vars == "y" | shrd_vars == "Y"){
+		shrd_flag = "_shrdexcl"
+		}
+	else{
+		shrd_flag = ""
+		}
+
+	#CHOOSE WHICH DISEASE COHORT TO CONSIDER FOR THE ANALYSIS
+	coh = readline("Which DCM cohort do you want to consider? (1=only prospectives, 2=only retrospectives, 3=merged)\n")
+	if(coh == 1){
+		coh_flag = "_prosp"
+		}
+	else if(coh == 2){
+		coh_flag = "_retro"
+		}
+	else if (coh == 3){
+		coh_flag = "_merged"	
+		}
+	else{
+		stop("Please re-run and select 1,2 or 3 indicating which cohort has to be considered")
+		}
+
+	#READ FILE WITH LIST OF SAMPLES IDS TO BE CONSIDERED FOR THE ANALYSIS	
+	cohorts_list = read.table("Samples_final.txt",header=T,sep="\t")
+
+	#READ LIST OF SAMPLE IDS - RUNDATE THAT WE WANT TO CONSIDER
+	rundates = read.table("rundates_final.txt",header=T)
+
+	#READ LIST OF VARIANTS/SAMPLES TO BE EXCLUDED BECAUSE CALLED IN RIGHT ID, RIGHT ICC PANEL, BUT 'WRONG' RUN
+	vars_wrongruns = read.table("vars_to_exclude_wrongruns.txt",colClasses=rep("character",6),header=T)
+	vars_badqual = read.table("vars_to_exclude_badqual.txt",colClasses=rep("character",6),header=T)
+	vars_baddepth = read.table("vars_to_exclude_baddepth.txt",colClasses=rep("character",6),header=T)
+	v_tx = rbind(vars_wrongruns,vars_badqual,vars_baddepth)
+	v_tx = unique(v_tx)
+
+
+	#READ FILE WITH POSITIONS COVERED BY >=10READS IN >=95% OF BOTH COHORTS
+#	well_cov = read.table("POS_95PC10X_NOICC4.txt")
+#	well_cov = simplify2array(well_cov)
+
+	#MODIFY COLUMN WITH SAMPLES
+	vars[,"BRU.Codes"] = as.character(vars[,"BRU.Codes"])
+	controls_set[,"BRU.Codes"] = as.character(controls_set[,"BRU.Codes"])
+
+	orig_vars = vars
+	casecontrol = 0
+	vcf1kg = c()
+	ESPvcf = c()
+	ESPcov = c()
+	counts = matrix(nrow=length(thres),ncol=2)
+	
+	library(biomaRt)
+	ensmart = useMart("ENSEMBL_MART_ENSEMBL",host="grch37.ensembl.org", path="/biomart/martservice", dataset="hsapiens_gene_ensembl")		
+		
+	#WHEN CASECONTROL==0 THE BURDEN IN CASES IS COMPUTED, WHEN CASECONTROL==1 THE BURDEN IN CONTROLS IS COMPUTED
+	while(casecontrol %in% 0:1){
+
+		if(casecontrol == 1){
+			vars = controls_set
+			controls_set = orig_vars
+			}
+	
+		vars = vars[,-c(1,2,6,11:13,15,17:21)]
+		vars = vars[,c(10:14,4:9,3,2,1)]															
+		colnames(vars) = c("CHROM","START","END","REF","ALT","GENE","VAR.CLASS","TRANSCRIPT.VAR","PROTEIN.VAR","SIFT","POLYPHEN","TARGET","NO.SAMPLES","SAMPLES")
+
+		#REMOVE LARGE INDELS
+		vars = subset(vars,(nchar(as.character(vars[,"REF"]))<=40 & nchar(as.character(vars[,"ALT"]))<=40))
+		
+		#MODIFY COLUMN WITH NO.SAMPLES
+		vars[,"NO.SAMPLES"] = as.numeric(gsub(" ","",sapply(strsplit(as.character(vars[,"NO.SAMPLES"]), "/"), "[", 1)))	
+	
+		sel_genes_vars = c()
+		zero_vars = F				
+			
+
+		#FOR EVERY GENE, SELECT ONLY VARIANTS IN THE GENE, GET THE 1KG VCF FILE, GET THE ESP VCF AND THE ESP COVERAGE FILE FOR THE GENE REGION AND UNIFY WITH OTHER GENES 
+		for(g in genes){
+		
+			sel_genes_vars = rbind(sel_genes_vars,subset(vars,vars[,"GENE"]==g))
+		
+			if(casecontrol == 0){
+				cat(paste("Importing ",g," data...\n",sep=""))					
+				gene_cohord = getBM(c("chromosome_name","start_position","end_position"),"hgnc_symbol",g,ensmart)
+				
+				if(dim(gene_cohord)[1]>1){
+					gene_cohord = gene_cohord[-c(c(which(grepl("PATCH",gene_cohord[,"chromosome_name"])),which(grepl("LRG",gene_cohord[,"chromosome_name"])),which(grepl("MHC",gene_cohord[,"chromosome_name"])),which(grepl("CTG",gene_cohord[,"chromosome_name"])))),]
+					if(dim(gene_cohord)[1]>1){
+						stop("Multiple annotations are present for this gene!")
+						}
+					chromosome = as.character(gene_cohord[1,"chromosome_name"])
+					}
+				else{
+					chromosome = as.character(gene_cohord[1,"chromosome_name"])
+					}
+				
+				if(! paste(g,".vcf",sep="") %in% list.files(OneKG_vcf_dir)){
+					system(paste("tabix -h ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/ALL.chr",as.character(chromosome),".phase1_release_v3.20101123.snps_indels_svs.genotypes.vcf.gz ",chromosome,":",as.character(gene_cohord[1,"start_position"]-200),"-",as.character(gene_cohord[1,"end_position"]+200)," > ","'",OneKG_vcf_dir,g,".vcf","'",sep=""))
+#					system(paste("tabix -h ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502/ALL.chr",as.character(chromosome),".phase3_shapeit2_mvncall_integrated_v2.20130502.genotypes.vcf.gz ",chromosome,":",as.character(gene_cohord[1,"start_position"]-200),"-",as.character(gene_cohord[1,"end_position"]+200)," > ","'",OneKG_vcf_dir,g,".vcf","'",sep=""))
+					}
+				#IF A NON-EXISTING GENE IS AMONG THE GENES TO BE ANALYZED, THE PROGRAM STOPS AND TELL WHICH GENE HAS NOT BEEN FOUND BY BIOMART (FILE WITH NO LINES)
+				new_vcf_1kg = try(read.table(paste(OneKG_vcf_dir,g,".vcf",sep=""),header=F)[,c(1,2,4,5,8)],silent=T)
+				if(is(new_vcf_1kg,"try-error")){
+					stop(paste("The gene ",g," does not exist!!!",sep=""))
+					}
+				vcf1kg = rbind(vcf1kg,new_vcf_1kg)
+				
+			
+				if(! paste(g,".vcf",sep="") %in% list.files(ESP_vcf_dir)){
+					path_vcf = paste(ESP_vcf_dir,"ESP6500SI-V2-SSA137.updatedProteinHgvs.chr",chromosome,".snps_indels.vcf",sep="")
+					system(paste("bgzip ","'",path_vcf,"'",sep=""))
+					system(paste("tabix -p vcf ","'",path_vcf,".gz","'",sep=""))
+					system(paste("tabix -h ","'",path_vcf,".gz","' ",chromosome,":",as.character(gene_cohord[1,"start_position"]-200),"-",as.character(gene_cohord[1,"end_position"]+200)," > ","'",ESP_vcf_dir,g,".vcf","'",sep=""))
+					system(paste("bgzip -d ","'",path_vcf,".gz","'",sep=""))
+					}
+					
+				new_vcf_esp = read.table(paste(ESP_vcf_dir,g,".vcf",sep=""),header=F)
+				new_vcf_esp = new_vcf_esp[,c(1,2,4,5,8)]
+				ESPvcf = rbind(ESPvcf,new_vcf_esp)
+			
+				path_cov = paste(ESP_cov_dir,"ESP6500SI-V2.chr",chromosome,".coverage.seq_blocks.txt",sep="")
+				cov_file = read.table(path_cov)
+				cov_file = cov_file[,-c(4:10)]
+				cov_file = subset(cov_file,(cov_file[,2]>(gene_cohord[1,"start_position"]-200) & cov_file[,3]<(gene_cohord[1,"end_position"]+200)))
+				ESPcov = rbind(ESPcov,cov_file)
+				}	
+			}
+		vars = sel_genes_vars
+
+		if(casecontrol == 0){
+			multiall_inesp = unique(ESPvcf[as.logical(duplicated(ESPvcf[,2])),2])
+			multiall_in1kg = unique(vcf1kg[as.logical(duplicated(vcf1kg[,2])),2])
+			ESPvcf = subset(ESPvcf,!(ESPvcf[,2] %in% multiall_inesp))
+			vcf1kg = subset(vcf1kg,!(vcf1kg[,2] %in% multiall_in1kg))
+			}
+		
+		vars = subset(vars,!(vars[,2] %in% multiall_inesp | vars[,2] %in% multiall_in1kg))
+
+		if(casecontrol == 0){
+			cat("Finished retrieving gene information from ESP and 1KG...starting variant annotation now\n")
+			cat("Analysing cases...\n")
+			colnames(vcf1kg)=c("CHROM","POS","REF","ALT","INFO")
+			colnames(ESPvcf)=c("CHROM","POS","REF","ALT","INFO")
+			colnames(ESPcov)=c("CHROM","START","END")
+			system("rm *.tbi")
+			}
+		else{
+			cat("Analysing controls...\n")
+			}
+
+		#####WHAT TO DO IF NUMBER OF VARS IS 0 AT THIS POINT#####
+		if(dim(vars)[1]==0){
+			if(casecontrol == 0){
+				counts[1:length(thres),1] = 0
+				zero_vars = T
+				casecontrol = casecontrol + 1
+				next
+				}
+			else{
+				counts[1:length(thres),2] = 0
+				zero_vars = T
+				break
+				}
+			}
+
+
+#####SELECTION OF VARIANT TYPE BASED ON CONSEQUENCE ON TRANSCRIPTS#####
+
+		#THE 'OR' AND 'AND' CONDITIONS IN THE 'IF' BLOCKS ARE NECESSARY FOR THE PURPOSES OF OUR ANALYSIS. WE WANT THE BURDEN OF SAMPLES WITH TRUNC VARS ONLY +
+		#NONTRUNC ONLY + BOTH TO BE = TO BURDEN OF SAMPLES WITH ALL CLASS 1 VARIANTS. SELECTING FOR CLASS 2 OR 3 AT THIS STAGE WITH MULTIPLE GENES SET LEADS TO
+		#AN INTRINSIC ERROR: THE BURDEN OF SAMPLES WITH VARIATION IN ONLY ONE GENE WILL BE HIGHER WHEN TESTING FOR LESS VARIANT TYPES.	 
+		if(regions==1 | (regions==2 && length(genes)>1) | (regions==3 && length(genes)>1)){
+			if (regions == 1){
+				var_label = "_allProtAlt"
+				}
+			else if(regions == 2){
+				var_label = "_TV"
+				}
+			else{
+				var_label = "_NonTV"
+				}
+			reg=c("missense_variant","frameshift_variant","splice_donor_variant","splice_acceptor_variant",
+			"inframe_deletion","inframe_insertion","stop_gained","stop_lost")
+			include = rep(F,dim(vars)[1])
+			for(a in 1:dim(vars)[1]){
+				for(b in reg){
+					if(grepl(b,as.character(vars[a,"VAR.CLASS"]))){
+						include[a]=T
+						}
+					}
+				}
+			}
+
+		else if(regions==2 && length(genes)==1){
+			var_label = "_TV"
+			reg=c("splice_donor_variant","splice_acceptor_variant","frameshift_variant","stop_gained","stop_lost")
+			include = rep(F,dim(vars)[1])
+			for(a in 1:dim(vars)[1]){
+				for(b in reg){
+					if(grepl(b,as.character(vars[a,"VAR.CLASS"]))){
+						include[a]=T
+						}
+					}
+				}
+			}
+
+		else if(regions==3 && length(genes)==1){
+			var_label = "_NonTV"
+			reg=c("missense_variant","inframe_insertion","inframe_deletion")
+			include = rep(F,dim(vars)[1])
+			for(a in 1:dim(vars)[1]){
+				for(b in reg){
+					if(grepl(b,as.character(vars[a,"VAR.CLASS"]))){
+						include[a]=T
+						}
+					}
+				}
+			}
+	
+		else if(regions==4){
+			var_label = "_notProtAlt"
+			reg=c("coding_sequence_variant","feature_truncation","intron_variant","feature_elongation","upstream_gene_variant","downstream_gene_variant","non_coding_exon_variant",
+			"nc_transcript_variant","synonymous_variant","5_prime_utr_variant","3_prime_utr_variant","splice_region_variant")
+			include = rep(F,dim(vars)[1])
+			for(a in 1:dim(vars)[1]){
+			#DIFFERENT HERE AS IN REG=1,2,3 WE WANT ANYONE WITH AT LEAST 1 DAMAGING VAR TYPE, NOW WE WANT ONLY WHO HAS ALL NON DAMAGING VAR TYPES, NOT AT LEAST 1
+				var_classes = unlist(strsplit(unlist(strsplit(gsub(" ","",as.character(vars[a,"VAR.CLASS"])),",")),";"))
+				if(sum(var_classes %in% reg == T)==length(var_classes)){
+					include[a]=T
+					}
+				else{
+					}
+				}
+			}
+
+		else if(regions=="all"){
+			var_label = "_allVarTypes"
+			include = rep(T,dim(vars)[1])
+			}																											
+		else{
+			var_label = "_customVarSet"
+			reg = unlist(strsplit(regions,","))
+			include = rep(F,dim(vars)[1])
+			for(a in 1:dim(vars)[1]){
+				for (w in reg){
+					if(!w %in% var_classes){
+						stop("Either the selection is not in form of x,y,z... or it includes invalid variant classes")
+						}
+					if(grepl(w,as.character(vars[a,"VAR.CLASS"]))){
+						include[a]=T
+						}
+					else{
+						}
+					}
+				}
+			}
+		vars = vars[as.logical(include),]
+
+		
+		#####WHAT TO DO IF NUMBER OF VARS IS 0 AT THIS POINT#####
+		if(dim(vars)[1]==0){
+			if(casecontrol == 0){
+				counts[1:length(thres),1] = 0
+				zero_vars = T
+				casecontrol = casecontrol + 1
+				next
+				}
+			else{
+				counts[1:length(thres),2] = 0
+				zero_vars = T
+				break
+				}
+			}
+
+
+
+		#RETAIN ONLY SAMPLES OF INTEREST IN THE CONTROLS SET (AS FROM THE 'cohort_list' OBJECT)
+		no_carriers_controls = c()
+		for(c in 1:dim(controls_set)[1]){
+			if(casecontrol == 0){
+				controls_set[c,"BRU.Codes"] = paste(subset(gsub(" ","",unlist(strsplit(as.character(controls_set[c,"BRU.Codes"]),","))),gsub(" ","",unlist(strsplit(as.character(controls_set[c,"BRU.Codes"]),","))) %in% cohorts_list[,"HVOL"]),collapse=",")
+				}
+			else {
+				controls_set[c,"BRU.Codes"] = paste(subset(gsub(" ","",unlist(strsplit(as.character(controls_set[c,"BRU.Codes"]),","))),(gsub(" ","",unlist(strsplit(as.character(controls_set[c,"BRU.Codes"]),","))) %in% cohorts_list[,"DCM_prosp"]) | (gsub(" ","",unlist(strsplit(as.character(controls_set[c,"BRU.Codes"]),","))) %in% cohorts_list[,"DCM_retro"])),collapse=",")
+				}
+			
+			if(nchar(controls_set[c,"BRU.Codes"])==0){
+				no_carriers_controls = c(no_carriers_controls,c)
+				}
+			}
+
+		if(length(no_carriers_controls)>0){
+			controls_set = controls_set[-c(no_carriers_controls),]
+			}
+
+
+
+		var_1KG_freq = c()
+		var_1KG_allcount = c()
+		var_ESP_freq = c()
+		var_ESP_allcount = c()
+		complex_indels = c()
+		ens_type_not_prot_cod = c()
+		diff_ref_allele_1kg = c()
+		diff_ref_allele_esp = c()	
+		covered_in_ESP = c()
+		no_carriers = c()
+		no_target = c()
+		over_prev = c()
+		not_well_cov = c()
+		cases_vec = gsub(" ","",unname(apply(vars[,c("CHROM","START","END","REF","ALT")],1,paste,collapse="")))
+		controls_vec = gsub(" ","",unname(apply(controls_set[,c(22:26)],1,paste,collapse="")))
+		shared_variants = cases_vec %in% controls_vec
+		vars[,"TARGET"] = as.character(vars[,"TARGET"]) #NEEDED TO AVOID 'FACTOR LEVEL' WARNING WHEN CHANGING THE TARGET IN THE NEXT LINES
+
+		
+		#FOR EVERY VARIANT IN THE ANALYZED SET
+		for(x in 1:dim(vars)[1]){
+			
+			#The if-else here "cleans" the target and sample ids columns to keep only samples of interest and the runs of interest. Some samples have been sequenced in
+			#multiple runs and/or multiple targets. The table "rundates" stores samples and run ids that have been selected for the analysis
+			if(casecontrol == 0){
+				targets = gsub(" ","",unlist(strsplit(as.character(vars[x,"TARGET"]),",")))
+				samples_vector = gsub(" ","",unlist(strsplit(as.character(vars[x,"SAMPLES"]),",")))
+				targ_ids = unique(unname(sapply(targets,function(xw) unlist(strsplit(xw,":"))[1])))
+				samp_tx = which(sapply(1:length(samples_vector),function(xw) length(which(v_tx$ID==samples_vector[xw]&v_tx$CHROM==vars[x,"CHROM"]&v_tx$START==vars[x,"START"]&v_tx$END==vars[x,"END"]&v_tx$REF==vars[x,"REF"]&v_tx$ALT==vars[x,"ALT"])))==1)
+				targ_tx = which(sapply(1:length(targ_ids),function(xw) length(which(v_tx$ID==targ_ids[xw]&v_tx$CHROM==vars[x,"CHROM"]&v_tx$START==vars[x,"START"]&v_tx$END==vars[x,"END"]&v_tx$REF==vars[x,"REF"]&v_tx$ALT==vars[x,"ALT"])))==1)
+				if(length(samp_tx)>0){
+					samples_vector = samples_vector[-samp_tx]
+					}
+				if(length(targ_tx)>0){
+					targets = targets[-targ_tx]
+					targ_ids = targ_ids[-targ_tx]
+					}
+				if(length(targ_ids)==0){
+					vars[x,"NO.SAMPLES"] == 0
+					vars[x,"SAMPLES"] = ""
+					}
+				else{
+					subset_rundates = rundates[as.logical(rowSums(sapply(targ_ids, function(xw) grepl(xw,rundates[,"ID_DATE"])))==1),]
+					targets_tokeep = sapply(1:dim(subset_rundates)[1], function(xw) paste(unlist(strsplit(as.character(subset_rundates[xw,"ID_DATE"]),"_"))[1],":",subset_rundates[xw,"TARGET"],sep=""))
+					new_targets = targets[as.logical(targets %in% targets_tokeep)]
+					vars[x,"TARGET"] = paste(new_targets,collapse=", ")		
+					vars[x,"SAMPLES"] = paste(samples_vector[as.logical(unname(sapply(samples_vector,function(xw) grepl(xw,vars[x,"TARGET"]))))],collapse=",")
+					}
+				}
+			else{
+				targets = gsub(" ","",unlist(strsplit(as.character(vars[x,"TARGET"]),",")))
+				samples_vector = gsub(" ","",unlist(strsplit(as.character(vars[x,"SAMPLES"]),",")))
+				targ_ids = unique(unname(sapply(targets,function(xw) unlist(strsplit(xw,":"))[1])))
+				samp_tx = which(sapply(1:length(samples_vector),function(xw) length(which(v_tx$ID==samples_vector[xw]&v_tx$CHROM==vars[x,"CHROM"]&v_tx$START==vars[x,"START"]&v_tx$END==vars[x,"END"]&v_tx$REF==vars[x,"REF"]&v_tx$ALT==vars[x,"ALT"])))==1)
+				targ_tx = which(sapply(1:length(targ_ids),function(xw) length(which(v_tx$ID==targ_ids[xw]&v_tx$CHROM==vars[x,"CHROM"]&v_tx$START==vars[x,"START"]&v_tx$END==vars[x,"END"]&v_tx$REF==vars[x,"REF"]&v_tx$ALT==vars[x,"ALT"])))==1)
+				
+
+				if(length(samp_tx)>0){
+					samples_vector = samples_vector[-samp_tx]
+					}
+				if(length(targ_tx)>0){
+					targets = targets[-targ_tx]
+					targ_ids = targ_ids[-targ_tx]
+					}
+
+				if(length(targ_ids)==0){
+					vars[x,"NO.SAMPLES"] = 0
+					vars[x,"SAMPLES"] = ""
+					}
+				else{
+					subset_rundates = rundates[as.logical(rowSums(sapply(targ_ids, function(xw) grepl(xw,rundates[,"ID_DATE"])))==1),]
+					targets_tokeep = sapply(1:dim(subset_rundates)[1], function(xw) paste(unlist(strsplit(as.character(subset_rundates[xw,"ID_DATE"]),"_"))[1],":",subset_rundates[xw,"TARGET"],sep=""))
+					new_targets = targets[as.logical(targets %in% targets_tokeep)]
+					vars[x,"TARGET"] = paste(new_targets,collapse=", ")
+					vars[x,"SAMPLES"] = paste(samples_vector[as.logical(unname(sapply(samples_vector,function(xw) grepl(xw,vars[x,"TARGET"]))))],collapse=",")
+					}
+				}		
+
+			vars[x,"NO.SAMPLES"] = length(unlist(strsplit(vars[x,"SAMPLES"],",")))
+
+			#EXCLUDE VARIANTS SHARED BY APPROX 1/250 INDIVIDUALS IN THE WHOLE COHORT (CASES+CONTROLS)
+#			if(shared_variants[x] == T){
+#				if(vars[x,"NO.SAMPLES"]+length(unlist(strsplit(as.character(controls_set[which(controls_vec==cases_vec[x]),2]),",")))>=3000){	#819 SAMPLES, 819*1/250 = 3.276, SO WE EXCLUDE A VARIANT IF IN 4 OR MORE SAMPLES
+#					over_prev = c(over_prev,x)
+#					}
+#				}
+#			else{
+#				if(vars[x,"NO.SAMPLES"]>=3000){
+#					over_prev = c(over_prev,x)
+#					}
+#				}
+
+			
+
+			#RETAIN ONLY SAMPLES OF INTEREST IN THE CASES (AS FROM THE 'cohorts_list' OBJECT)
+			if(casecontrol == 0){
+				if(coh == 1){
+					vars[x,"SAMPLES"] = paste(subset(gsub(" ","",unlist(strsplit(as.character(vars[x,"SAMPLES"]),","))),gsub(" ","",unlist(strsplit(as.character(vars[x,"SAMPLES"]),","))) %in% cohorts_list[,"DCM_prosp"]),collapse=",")
+					}
+				else if(coh == 2){
+					vars[x,"SAMPLES"] = paste(subset(gsub(" ","",unlist(strsplit(as.character(vars[x,"SAMPLES"]),","))),gsub(" ","",unlist(strsplit(as.character(vars[x,"SAMPLES"]),","))) %in% cohorts_list[,"DCM_retro"]),collapse=",")
+					}
+				}
+			
+			vars[x,"NO.SAMPLES"] = length(unlist(strsplit(vars[x,"SAMPLES"],",")))			
+			
+			#STORE IN A VECTOR IF THE VARIANT IS CARRIED OR NOT BY ANY SAMPLE OF INTEREST (IF NOT, WILL BE LATER DISCARDED)
+			if(vars[x,"NO.SAMPLES"]==0){
+				no_carriers = c(no_carriers,x)
+				}
+			
+			#STORE IN A VECTOR IF THE VARIANT IS ONLY CALLED IN TARGETS THAT ARE NOT OF OUR INTEREST (E.G. SAMPLES NOT OF INTEREST OR ICCV4 RUNS ON SAMPLES OF INTEREST)
+			if(nchar(vars[x,"TARGET"])==0){
+				no_target = c(no_target,x)
+				}
+
+
+			#IF IT IS A SNP
+			if(nchar(as.character(vars[x,"REF"]))==1 & nchar(as.character(vars[x,"ALT"]))==1 & as.character(vars[x,"REF"])!="-" & as.character(vars[x,"ALT"])!="-"){
+			
+#####SNP - 1000 GENOMES#####
+			
+				if(length(which(vcf1kg[,"POS"]==vars[x,"START"]))==0 | length(which(vcf1kg[,"POS"]==vars[x,"START"] & vcf1kg[,"CHROM"]==substr(vars[x,"CHROM"],4,6)))==0){
+					
+					#IF NO VARIANTS AT THAT POSITION ARE IN 1KG, RECORD AS ABSENT (THE CONDITION AFTER THE 'OR' DEALS WITH THE RARE CASE OF VARIANT ON chr x AND pos y IN OUR VARS WHILE IS PRESENT A VARIANT ON chr z AND pos y IN THE 1KG VCF
+					var_1KG_freq = c(var_1KG_freq,".")
+					var_1KG_allcount = c(var_1KG_allcount,0)
+					}
+				else{
+					#IF THERE IS SOMETHING AT THAT POSITION	
+					var_index_1KG = which(vcf1kg[,"POS"]==vars[x,"START"] & vcf1kg[,"CHROM"]==substr(vars[x,"CHROM"],4,6) & sum(nchar(unlist(strsplit(as.character(vcf1kg[,"ALT"]),",")))==1)>0)
+
+					if(length(var_index_1KG)>0){
+						if((as.character(vcf1kg[var_index_1KG,"REF"]) == as.character(vars[x,"REF"])) & (as.character(vcf1kg[var_index_1KG,"ALT"]) == as.character(vars[x,"ALT"]))){ 
+
+							#IF THE SAME BIALLELIC VARIANT IS IN 1KG, STORE ALLELE FREQ % AND COUNT
+							
+							var_info = unlist(strsplit(as.character(vcf1kg[which(vcf1kg[,"POS"]==vars[x,"START"]),"INFO"]),";"))
+							
+							if(cauc=="n" | cauc=="N"){
+								var_freq = (as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))*100
+								var_count = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+								}
+							else{
+								if(sum(grepl("EUR_AF",var_info))==1){
+									var_freq = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,7)=="EUR_AF=")],"="))[2])*100
+									var_count = round(758*(var_freq/100))
+									}
+								else{
+									var_freq = "."
+									var_count = 0
+									}
+								}
+			
+	
+							var_1KG_freq = c(var_1KG_freq,var_freq)
+							var_1KG_allcount = c(var_1KG_allcount,var_count)
+							}
+						
+						else if((as.character(vcf1kg[var_index_1KG,"REF"]) == as.character(vars[x,"REF"])) & length(unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"]),",")))>1){
+							#IF THE SITE IS MULTIALLELIC IN 1KG
+							print("WARNING: multi-allelic position in Phase 1 of 1KG detected!")	#there should be no multiallelic variant calls in Phase 1 of 1KG!						
+
+							if(vars[x,"ALT"] %in% unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"])))){
+								#IF THE VARIANT IS WHITHIN THE ALLELES
+								var_allele_position = which(unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"]))) == as.character(vars[x,"ALT"]))
+								var_info = unlist(strsplit(as.character(vcf1kg[which(vcf1kg[,"POS"]==vars[x,"START"]),"INFO"]),";"))
+								var_counts = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+								var_count = unlist(strsplit(var_counts,","))[var_allele_position]
+								var_freq = (var_count/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))*100
+								var_1KG_freq = c(var_1KG_freq,var_freq)
+								var_1KG_allcount = c(var_1KG_allcount,var_count)
+								}							
+							else{
+								var_1KG_freq = c(var_1KG_freq,".")
+								var_1KG_allcount = c(var_1KG_allcount,0)
+								}
+							}
+				
+						else{	#IF NOT SAME VARIANT AND NOT MULTIALLELIC THERE ARE TWO POSSIBILITIES: 1.SAME REF AND DIFFERENT ALLELE 2.DIFFERENT REF (SHOULD NEVER BE)
+							if(as.character(vcf1kg[var_index_1KG,"REF"]) == as.character(vars[x,"REF"]) | nchar(as.character(vcf1kg[var_index_1KG,"REF"]))!=nchar(as.character(vars[x,"REF"]))){
+								#E.G. IF IN THE SAME POSITION WHERE OUR SNP IS, THERE IS A DELETION/INSERTION IN 1KG
+								var_1KG_freq = c(var_1KG_freq,".")
+								var_1KG_allcount = c(var_1KG_allcount,0)
+								}
+							else{
+								#DIFFERENT REF ALLELE: VARIANTS WILL BE LATER DISCARDED
+								diff_ref_allele_1kg = c(diff_ref_allele_1kg,x)
+								var_1KG_freq = c(var_1KG_freq,".")
+								var_1KG_allcount = c(var_1KG_allcount,0)
+								print("WARNING: found a variant where a different reference allele is reported in 1KG Project!!")
+								}
+							}
+						}	
+					else{
+						var_1KG_freq = c(var_1KG_freq,".")
+						var_1KG_allcount = c(var_1KG_allcount,0)
+						}
+					}
+
+#####SNP - ESP#####			
+				#IF THERE IS NOTHING AT THAT POSITION IN ESP
+				if(length(which(ESPvcf[,"POS"]==vars[x,"START"]))==0 | length(which(ESPvcf[,"POS"]==vars[x,"START"] & ESPvcf[,"CHROM"]==substr(vars[x,"CHROM"],4,6)))==0){
+					var_esp_freq = "."
+					alt_ac_esp = 0
+					}
+				else{
+					#IF THERE IS SOMETHING AT THAT POSITION
+					var_index_esp = which(ESPvcf[,"POS"]==vars[x,"START"] & ESPvcf[,"CHROM"]==substr(vars[x,"CHROM"],4,6) & sum(nchar(unlist(strsplit(as.character(ESPvcf[,"ALT"]),",")))==1)>0)
+					
+					if(length(var_index_esp)>0){
+						if(as.character(vars[x,"REF"])==as.character(ESPvcf[var_index_esp,"REF"]) & as.character(vars[x,"ALT"])==as.character(ESPvcf[var_index_esp,"ALT"])){
+							#IF REF AND ALT ALLELES ARE THE SAME
+							if(cauc == "n" | cauc == "N"){
+								alt_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[1]#store alt allele count
+								ref_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[2]#store ref allele count
+								if(alt_ac_esp < ref_ac_esp){	#if alt allele is less common than ref allele (very often)
+									var_esp_freq = as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3])	#retain MAF as allele freq
+									}
+								else{
+									var_esp_freq = 100 - as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3])
+									}
+								}
+							else{
+								alt_ac_esp = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[1]#store alt allele count
+								ref_ac_esp = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[2]#store ref allele count
+								
+								if(alt_ac_esp < ref_ac_esp){	#if alt allele is less common than ref allele (very often)
+									var_esp_freq = as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1]))	#retain MAF as allele freq
+									}
+								else{
+									var_esp_freq = 100 - as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1]))
+									}
+								}
+							}
+						else if((as.character(vars[x,"REF"])==as.character(ESPvcf[var_index_esp,"REF"])) & length(unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"]),",")))>1){
+							#IF REF IS THE SAME BUT THE SITE IS MULTIALLELIC IN ESP							
+			
+							if(vars[x,"ALT"] %in% unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"]),","))){
+								#IF THE VARIANT IS WITHIN THE ALLELES
+								var_allele_position = which(unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"]),",")) == as.character(vars[x,"ALT"]))
+								if(cauc == "n" | cauc == "N"){
+									allele_counts_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))
+									
+									}
+								else{
+									allele_counts_esp = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))
+									}
+								alt_ac_esp = allele_counts_esp[var_allele_position]
+								var_esp_freq = as.numeric((alt_ac_esp / sum(allele_counts_esp))*100)
+								}
+							else{
+								alt_ac_esp = 0
+								var_esp_freq = "."
+								}
+							}
+						else{	#IF NOT SAME VARIANT AND NOT MULTIALLELIC THERE ARE TWO POSSIBILITIES: 1.SAME REF AND DIFFERENT ALLELE 2.DIFFERENT REF (SHOULD NEVER BE)
+							if(as.character(ESPvcf[var_index_esp,"REF"]) == as.character(vars[x,"REF"]) | nchar(as.character(ESPvcf[var_index_esp,"REF"]))!=nchar(as.character(vars[x,"REF"]))){
+								#E.G. IF IN THE SAME POSITION WHERE OUR SNP IS, THERE IS A DELETION/INSERTION IN ESP
+								var_esp_freq = "."
+								alt_ac_esp = 0
+								}
+							else{
+								#DIFFERENT REF ALLELE: VARIANTS WILL BE LATER DISCARDED
+								diff_ref_allele_esp = c(diff_ref_allele_esp,x)
+								var_esp_freq = "."
+								alt_ac_esp = 0
+								print("WARNING: found a variant where a different reference allele is reported in ESP!!")
+								}
+							}				 
+						}
+					else{
+						var_esp_freq = "."
+						alt_ac_esp = 0
+						}					
+					}
+				}	
+
+#####INSERTION - 1000 GENOMES#####
+
+			#IF IT IS AN INSERTION (NB: for an insertion pos in 1KG == END for our vars)
+			else if(vars[x,"REF"]=="-"){	
+				if(length(which(vcf1kg[,"POS"]==vars[x,"END"]))==0 | length(which(vcf1kg[,"POS"]==vars[x,"END"] & vcf1kg[,"CHROM"]==substr(vars[x,"CHROM"],4,6)))==0){
+				
+					#IF NOT IN 1KG, RECORD AS ABSENT
+					var_1KG_freq = c(var_1KG_freq,".")
+					var_1KG_allcount = c(var_1KG_allcount,0)		
+					}
+				else{
+					#IF THERE IS SOMETHING AT THAT POSITION
+					var_index_1KG = which(vcf1kg[,"POS"]==vars[x,"END"] & vcf1kg[,"CHROM"]==substr(vars[x,"CHROM"],4,6) & nchar(as.character(vcf1kg[,"REF"]))<nchar(as.character(vcf1kg[,"ALT"])) & (!grepl(",",as.character(vcf1kg[,"ALT"])))) #store row index where that position is in 1KG
+
+					if(length(var_index_1KG)>0){
+						if(substr(as.character(vcf1kg[var_index_1KG,"ALT"]),2,10000) == as.character(vars[x,"ALT"])){
+					
+							#IF IT IS THE SAME VARIANT, STORE PERCENT ALLELE FREQ AND COUNT
+					
+							var_info = unlist(strsplit(as.character(vcf1kg[var_index_1KG,"INFO"]),";"))
+							
+							if(cauc=="n" | cauc=="N"){
+								var_freq = (as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))*100
+								var_count = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+								}
+							else{
+								if(sum(grepl("EUR_AF",var_info))==1){
+									var_freq = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,7)=="EUR_AF=")],"="))[2])*100
+									var_count = round(758*(var_freq/100))
+									}
+								else{
+									var_freq = "."
+									var_count = 0
+									}
+								}				
+
+							var_1KG_freq = c(var_1KG_freq,var_freq)
+							var_1KG_allcount = c(var_1KG_allcount,var_count)
+							}
+
+						else if(length(unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"]),",")))>1){
+							#IF THE SITE IS MULTIALLELIC IN 1KG
+
+							print("WARNING: multi-allelic position in Phase 1 of 1KG detected!")	#there should be no multiallelic variant calls in Phase 1 of 1KG!
+
+							if(vars[x,"ALT"] %in% substr(unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"]))),2,10000)){
+								#IF VARIANT IS WITHIN THE ALLELES
+								var_allele_position = which(substr(unlist(strsplit(as.character(vcf1kg[var_index_1KG,"ALT"]))),2,10000) == as.character(vars[x,"ALT"]))
+								var_info = unlist(strsplit(as.character(vcf1kg[which(vcf1kg[,"POS"]==vars[x,"START"]),"INFO"]),";"))
+								var_counts = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+								var_count = unlist(strsplit(var_counts,","))[var_allele_position]
+								var_freq = (var_count/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))*100
+								var_1KG_freq = c(var_1KG_freq,var_freq)
+								var_1KG_allcount = c(var_1KG_allcount,var_count)
+								}
+							else{
+								var_1KG_freq = c(var_1KG_freq,".")
+								var_1KG_allcount = c(var_1KG_allcount,0)	
+								}
+							}
+						else{
+							#IF E.G. IN THE SAME POSITION WHERE OUR INSERTION IS, THERE IS A SNP IN 1KG
+							var_1KG_freq = c(var_1KG_freq,".")
+							var_1KG_allcount = c(var_1KG_allcount,0)	
+							}		
+						}
+					else{
+						var_1KG_freq = c(var_1KG_freq,".")
+						var_1KG_allcount = c(var_1KG_allcount,0)
+						}				
+					}
+
+#####INSERTION - ESP#####
+				if(length(which(ESPvcf[,"POS"]==vars[x,"END"]))==0 | length(which(ESPvcf[,"POS"]==vars[x,"END"] & ESPvcf[,"CHROM"]==substr(vars[x,"CHROM"],4,6)))==0){
+					#IF THERE IS NOTHING AT THAT POSITION IN ESP
+					var_esp_freq = "."
+					alt_ac_esp = 0
+					}
+				
+				else{		
+					#IF A VARIANT AT THAT POSITION IS IN ESP---NB:FOR INSERTIONS POS(ESP)=END(BEEHIVE)
+					var_index_esp = which(ESPvcf[,"POS"]==vars[x,"END"] & ESPvcf[,"CHROM"]==substr(vars[x,"CHROM"],4,6) & nchar(as.character(ESPvcf[,"REF"]))<nchar(as.character(ESPvcf[,"ALT"])) & (!grepl(",",as.character(ESPvcf[,"ALT"]))))
+	
+					if(length(var_index_esp)>0){
+
+						#NB only ALT can be checked if it is an insertion, REF is always "-" for our variant
+						if(substr(as.character(ESPvcf[var_index_esp,"ALT"]),2,10000)==as.character(vars[x,"ALT"])){
+							#IF IT IS THE SAME VARIANT
+							if(cauc == "n" | cauc == "N"){
+								alt_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[1]#store alt allele count
+								ref_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[2]#store ref allele count
+								if(alt_ac_esp < ref_ac_esp){	#if alt allele is less common than ref allele (very often)
+									var_esp_freq = as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3])	#retain MAF as allele freq
+									}
+								else{
+									var_esp_freq = 100 - as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3])
+									}
+								}
+							else{
+								alt_ac_esp = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[1]#store alt allele count
+								ref_ac_esp = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[2]#store ref allele count
+								
+								if(alt_ac_esp < ref_ac_esp){	#if alt allele is less common than ref allele (very often)
+									var_esp_freq = as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1]))	#retain MAF as allele freq
+									}
+								else{
+									var_esp_freq = 100 - as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1]))
+									}
+								}
+							}
+						else if(length(unlist(strsplit(as.character(ESPvcf[var_index_esp,"REF"]),",")))>1){
+							#IF THE SITE IS MULTIALLELIC
+							if(vars[x,"ALT"] %in% substr(unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"]))),2,10000)){
+								#IF THE VARIANT IS WITHIN THE ALLELES
+								var_allele_position = which(unlist(strsplit(as.character(ESPvcf[var_index_esp,"ALT"]),",")) == as.character(vars[x,"ALT"]))
+								if(cauc == "n" | cauc == "N"){
+									allele_counts_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))
+									
+									}
+								else{
+									allele_counts_esp = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))
+									}
+								alt_ac_esp = allele_counts_esp[var_allele_position]
+								var_esp_freq = as.numeric((alt_ac_esp / sum(allele_counts_esp))*100)
+								}
+							else{
+								#IF THE VARIANT IS NOT WITHIN THE ALLELES
+								var_esp_freq = "."
+								alt_ac_esp = 0
+								}
+							}
+						else{
+							#IF E.G. IN THE SAME POSITION WHERE OUR INSERTION IS, THERE IS A SNP IN 1KG
+							var_esp_freq = "."
+							alt_ac_esp = 0
+							}
+						}
+					else{
+						var_esp_freq = "."
+						alt_ac_esp = 0
+						}
+					}
+				}
+		
+#####DELETION - 1000 GENOMES#####						
+			#IF IT IS A DELETION
+			else if(vars[x,"ALT"]=="-"){		
+				if(length(which(vcf1kg[,"POS"]==vars[x,"START"]-1))==0 | length(which(vcf1kg[,"POS"]==vars[x,"START"]-1 & vcf1kg[,"CHROM"]==substr(vars[x,"CHROM"],4,6)))==0){
+				
+					#IF THERE IS NOTHING AT THAT POSITION IN 1KG				
+					var_1KG_freq = c(var_1KG_freq,".")
+					var_1KG_allcount = c(var_1KG_allcount,0)		
+					}
+				else{	
+					#IF THERE IS SOMETHING AT THAT POSITION IN 1KG	
+
+					var_index_1KG = which(vcf1kg[,"POS"]==vars[x,"START"]-1 & vcf1kg[,"CHROM"]==substr(vars[x,"CHROM"],4,6) & nchar(as.character(vcf1kg[,"REF"]))>nchar(as.character(vcf1kg[,"ALT"])) & (!grepl(",",as.character(vcf1kg[,"ALT"]))))
+
+					if(length(var_index_1KG)>0){
+						if(substr(as.character(vcf1kg[var_index_1KG,"REF"]),2,10000) == as.character(vars[x,"REF"])){
+							#IF SAME VARIANT, STORE PERCENT ALLELE FREQ AND COUNT
+							var_info = unlist(strsplit(as.character(vcf1kg[var_index_1KG,"INFO"]),";"))
+							
+							if(cauc=="n" | cauc=="N"){
+								var_freq = (as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])/as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AN=")],"="))[2]))*100
+								var_count = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,3)=="AC=")],"="))[2])
+								}
+							else{
+								if(sum(grepl("EUR_AF",var_info))==1){
+									var_freq = as.numeric(unlist(strsplit(var_info[which(substr(as.character(var_info),1,7)=="EUR_AF=")],"="))[2])*100
+									var_count = round(758*(var_freq/100))
+									}
+								else{
+									var_freq = "."
+									var_count = 0
+									}
+								}
+
+							var_1KG_freq = c(var_1KG_freq,var_freq)
+							var_1KG_allcount = c(var_1KG_allcount,var_count)
+							}
+						else{				#NB: A DELETION CAN'T BE 'MULTIALLELIC'. EITHER IT IS THE SAME DELETION OR NOT.
+							var_1KG_freq = c(var_1KG_freq,".")
+							var_1KG_allcount = c(var_1KG_allcount,0)
+							}
+						}
+					else{
+						var_1KG_freq = c(var_1KG_freq,".")
+						var_1KG_allcount = c(var_1KG_allcount,0)
+						}
+					}
+		
+#####DELETION - ESP#####
+				if(length(which(ESPvcf[,"POS"]==vars[x,"START"]-1))==0 | length(which(ESPvcf[,"POS"]==vars[x,"START"]-1 & ESPvcf[,"CHROM"]==substr(vars[x,"CHROM"],4,6)))==0){
+					#IF THERE IS NOTHING AT THAT POSITION IN ESP
+					var_esp_freq = "."
+					alt_ac_esp = 0
+					}
+
+				#IF A VARIANT AT THAT POSITION IS IN ESP---NB:FOR DELETIONS POS(ESP)=START-1(BEEHIVE)
+				else{
+
+					var_index_esp = which(ESPvcf[,"POS"]==vars[x,"START"]-1 & ESPvcf[,"CHROM"]==substr(vars[x,"CHROM"],4,6) & nchar(as.character(ESPvcf[,"REF"]))>nchar(as.character(ESPvcf[,"ALT"])) & (!grepl(",",as.character(ESPvcf[,"ALT"]))))
+
+					if(length(var_index_esp)>0){
+						if(substr(as.character(ESPvcf[var_index_esp,"REF"]),2,10000) == as.character(vars[x,"REF"])){
+							#IF SAME VARIANT, STORE COUNT AND FREQ
+							if(cauc == "n" | cauc == "N"){
+								alt_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[1]#store alt allele count
+								ref_ac_esp = as.numeric(gsub("TAC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[4],","))))[2]#store ref allele count
+								if(alt_ac_esp < ref_ac_esp){	#if alt allele is less common than ref allele (very often)
+									var_esp_freq = as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3])	#retain MAF as allele freq
+									}
+								else{
+									var_esp_freq = 100 - as.numeric(unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[3])
+									}
+								}
+							else{
+								alt_ac_esp = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[1]#store alt allele count
+								ref_ac_esp = as.numeric(gsub("EA_AC=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[2],","))))[2]#store ref allele count
+								
+								if(alt_ac_esp < ref_ac_esp){	#if alt allele is less common than ref allele (very often)
+									var_esp_freq = as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1]))	#retain MAF as allele freq
+									}
+								else{
+									var_esp_freq = 100 - as.numeric(gsub("MAF=","",unlist(strsplit(unlist(strsplit(as.character(ESPvcf[var_index_esp,"INFO"]),";"))[5],","))[1]))
+									}
+								}
+							}
+						else{
+							#EITHER DIFFERENT VAR TYPE AT SAME POS IN ESP OR DELETION OF DIFFERENT LENGTH BUT SAME POSITION
+							var_esp_freq = "."
+							alt_ac_esp = 0
+							}
+						}
+					else{
+						var_esp_freq = "."
+						alt_ac_esp = 0
+						}										
+					}
+				}
+
+#####COMPLEX INDEL#####
+			else{
+				# COMPLEX INDELS (INSERTION + DELETION) CAN NOT BE ANALYZED AND WILL BE LATER DISCARDED
+				complex_indels = c(complex_indels,x)			
+				var_1KG_freq = c(var_1KG_freq,".")
+				var_1KG_allcount = c(var_1KG_allcount,0)
+				var_esp_freq = "."
+				alt_ac_esp = 0
+				}
+
+			var_ESP_freq = c(var_ESP_freq,var_esp_freq)
+			var_ESP_allcount = c(var_ESP_allcount,alt_ac_esp)
+
+#####CHECK TRANSCRIPT TYPES#####
+			if(as.character(vars[x,"TRANSCRIPT.VAR"] != "")){
+				transcripts = unlist(strsplit(paste(substr(gsub(" ","",unlist(strsplit(as.character(vars[x,"TRANSCRIPT.VAR"]),";"))),1,15),collapse=","),","))
+				biotypes = getBM("transcript_biotype","ensembl_transcript_id",transcripts,ensmart)	
+				
+				#IF TRANSCRIPT VARIATIONS ARE PRESENT,DISCARD VARIANT IF NOT HITTING AT LEAST ONE PROT.CODING TRANSCRIPT
+				if(!"protein_coding" %in% biotypes){
+					ens_type_not_prot_cod = c(ens_type_not_prot_cod,x)
+					}
+				}
+			else{
+				#IF NO TRANSCRIPT VARIATION ARE PRESENT, DISCARD VARIANT
+				ens_type_not_prot_cod = c(ens_type_not_prot_cod,x)		
+				}
+
+			
+			#STORE IN LOGICAL VECTOR IF COVERED IN ESP OR NOT
+			if(sum((subset(ESPcov,ESPcov[,"CHROM"]==substr(vars[x,"CHROM"],4,5))[,"START"]<=vars[x,"START"] & subset(ESPcov,ESPcov[,"CHROM"]==substr(vars[x,"CHROM"],4,5))[,"END"]>=vars[x,"END"])==T)==1){
+				covered_in_ESP = c(covered_in_ESP,T)
+				}
+			else{
+				covered_in_ESP = c(covered_in_ESP,F)
+				}
+			
+			
+			if(x == round(dim(vars)[1]*0.10)){
+				cat("10% through the analysed set...\n")
+				}
+			else if(x == round(dim(vars)[1]*0.2)){
+				cat("20% through the analysed set...\n")
+				}
+			else if(x == round(dim(vars)[1]*0.3)){
+				cat("30% through the analysed set...\n")
+				}
+			else if(x == round(dim(vars)[1]*0.4)){
+				cat("40% through the analysed set...\n")
+				}
+			else if(x == round(dim(vars)[1]*0.5)){
+				cat("50% through the analysed set...\n")
+				}
+			else if(x == round(dim(vars)[1]*0.6)){
+				cat("60% through the analysed set...\n")
+				}
+			else if(x == round(dim(vars)[1]*0.70)){
+				cat("70% through the analysed set...\n")
+				}
+			else if(x == round(dim(vars)[1]*0.80)){
+				cat("80% through the analysed set...\n")
+				}
+			else if(x == round(dim(vars)[1]*0.90)){
+				cat("90% through the analysed set...\n")
+				}
+			}	#NB this bracket closes the main for loop (that going over each variant)
+
+		vars = cbind(vars,var_1KG_freq)
+		vars = cbind(vars,var_1KG_allcount)
+		vars = cbind(vars,var_ESP_freq)
+		vars = cbind(vars,var_ESP_allcount)
+		vars = cbind(vars,covered_in_ESP)
+
+		
+		if(length(complex_indels)>0 | length(diff_ref_allele_1kg)>0 | length(diff_ref_allele_esp)>0){		
+			if(casecontrol == 0){
+				cat("CASES:\n")
+				}
+			else{
+				cat("CONTROLS:\n")
+				}
+
+			if(length(complex_indels)>0){
+				cat(paste("Rows with insertions+deletions events (REMOVED):",paste(complex_indels,collapse=" "),":\n"))
+				}
+			if(length(diff_ref_allele_1kg)>0){
+				cat(paste("Rows with different reference allele reported in 1KG Project (REMOVED):",paste(diff_ref_allele_1kg,collapse=" "),":\n"))
+				}
+			if(length(diff_ref_allele_esp)>0){
+				cat(paste("Rows with different reference allele reported in ESP (REMOVED):",paste(diff_ref_allele_esp,collapse=" "),":\n\n"))
+				}
+			}
+	
+		
+		#REMOVE COMPL INDELS, NOT PROT CODING TRANSCRIPT VARIANTS, VARS IN NONE OF OUR SAMPLES OF INTEREST, VARS WITH DIFFERENT REFERENCE, VARS AT POS NOT COVERED WELL ENOUGH, VARS IN MORE THAN 4 PEOPLE
+		if(length(c(complex_indels,ens_type_not_prot_cod,no_carriers,no_target,diff_ref_allele_1kg,diff_ref_allele_esp,over_prev,not_well_cov))>0){
+			vars = vars[-c(unique(c(complex_indels,ens_type_not_prot_cod,no_carriers,no_target,diff_ref_allele_1kg,diff_ref_allele_esp,over_prev,not_well_cov))),]
+
+			#####WHAT TO DO IF NUMBER OF VARS IS 0 AT THIS POINT#####
+			if(dim(vars)[1]==0){
+				if(casecontrol == 0){
+					counts[1:length(thres),1] = 0
+					zero_vars = T
+					casecontrol = casecontrol + 1
+					next
+					}
+				else{
+					counts[1:length(thres),2] = 0
+					zero_vars = T
+					break
+					}
+				}		
+			}
+	
+
+#####SELECTION OF FREQUENCY THRESHOLD##### 
+		
+		for(u in 1:length(thres)){
+			end_vars = vars
+
+			if(grepl("-",as.character(thres[u]))){
+				low_bound = unlist(strsplit(thres[u],"-"))[1]
+				hi_bound = unlist(strsplit(thres[u],"-"))[2]
+				
+				if(grepl("all",as.character(thres[u]))){
+					lowbound_ac = as.numeric(unlist(strsplit(as.character(low_bound),"all"))[1])
+					highbound_ac = as.numeric(unlist(strsplit(as.character(hi_bound),"all"))[1])
+					end_vars = subset(end_vars,((as.numeric(end_vars[,"var_1KG_allcount"]) + as.numeric(end_vars[,"var_ESP_allcount"]) >= lowbound_ac) & 
+					(as.numeric(end_vars[,"var_1KG_allcount"]) + as.numeric(end_vars[,"var_ESP_allcount"]) <= highbound_ac)))
+					}
+				else{
+					low_bound = as.numeric(low_bound)
+					hi_bound = as.numeric(hi_bound)
+					#NB: THE SELECTION OF VARIANTS IN A FREQ RANGE INCLUDE THE LOWER BOUND AND EXCLUDE THE HIGHER BOUND
+					if(low_bound == 0 & hi_bound == 0){
+							end_vars = subset(end_vars,((as.character(end_vars[,"var_1KG_freq"])=="." | as.character(end_vars[,"var_1KG_freq"])=="0") & (as.character(end_vars[,"var_ESP_freq"])=="." | as.character(end_vars[,"var_ESP_freq"])=="0")))
+							}
+					else{
+						if(low_bound == 0){
+							end_vars = suppressWarnings(subset(end_vars,((as.numeric(as.character(end_vars[,"var_ESP_freq"]))<hi_bound | as.character(end_vars[,"var_ESP_freq"])==".") & 
+							(as.numeric(as.character(end_vars[,"var_1KG_freq"]))<hi_bound | as.character(end_vars[,"var_1KG_freq"])==".") & end_vars[,"covered_in_ESP"]==T) | 
+							((as.numeric(as.character(end_vars[,"var_1KG_freq"]))<hi_bound | as.character(end_vars[,"var_1KG_freq"])==".") & end_vars[,"covered_in_ESP"]==F)))	
+							}
+						else{
+							end_vars = suppressWarnings(subset(end_vars,((as.numeric(as.character(end_vars[,"var_ESP_freq"]))<hi_bound & as.numeric(as.character(end_vars[,"var_ESP_freq"]))>=low_bound & 
+							as.numeric(as.character(end_vars[,"var_1KG_freq"]))<hi_bound & as.numeric(as.character(end_vars[,"var_1KG_freq"]))>=low_bound) & end_vars[,"covered_in_ESP"]==T) | 
+							((as.numeric(as.character(end_vars[,"var_1KG_freq"]))<hi_bound & as.numeric(as.character(end_vars[,"var_1KG_freq"]))>=low_bound) & end_vars[,"covered_in_ESP"]==F)))	
+							}
+						}
+					}
+				
+				}
+			else if(grepl("max",as.character(thres[u]))){
+				allele_limit = as.numeric(substr(as.character(thres[u]),4,10000))
+				end_vars = subset(end_vars,(as.numeric(end_vars[,"var_1KG_allcount"]) + as.numeric(end_vars[,"var_ESP_allcount"]) <= allele_limit))
+				}
+			else if(grepl("all",as.character(thres[u])) & !(grepl("-",as.character(thres[u])))){
+				wanted_all_count = as.numeric(unlist(strsplit(as.character(thres[u]),"all"))[1])
+				end_vars = subset(end_vars,(as.numeric(end_vars[,"var_1KG_allcount"]) + as.numeric(end_vars[,"var_ESP_allcount"]) == wanted_all_count))
+				}
+			else{
+				stop("Frequency thresholds must be entered either in the form 'X-Y' to indicate a % frequency range, or maxX to indicate a threshold for max allele count")
+				}
+
+			#STORE SET OF VARIANTS IN THE ANALYZED SET AND IN THE OTHER ONE
+			comp_vec = gsub(" ","",unname(apply(controls_set[,c(22:26)],1,paste,collapse="")))
+			end_vars_vec = gsub(" ","",unname(apply(end_vars[,c("CHROM","START","END","REF","ALT")],1,paste,collapse="")))
+
+
+			#IF THERE ARE VARIANTS LEFT, ELIMINATE THOSE SHARED WITH THE OTHER SET IF DESIRED
+			if(length(end_vars_vec)>0){
+				if(casecontrol == 0){
+					if(shrd_vars == "y" | shrd_vars == "Y"){
+						end_vars = end_vars[as.logical(!(end_vars_vec %in% comp_vec)),]
+						}
+					}	
+				else if(casecontrol == 1){
+					if(shrd_vars == "y" | shrd_vars == "Y"){
+						end_vars = end_vars[as.logical(!(end_vars_vec %in% comp_vec)),]
+						}
+					}
+	
+				#IF SIFTPOL == YES DISCARD VARIANTS BENIGN FOR SIFT AND POLYPHEN AND ADD STRING _SP TO THE SAVED FILE
+				sp = ""
+				if(siftpol == "y" | siftpol == "Y"){
+					sp = "_SP"
+					end_vars = subset(end_vars,(grepl("deleterious",end_vars[,"SIFT"])|grepl("damaging",end_vars[,"POLYPHEN"]))|(nchar(as.character(end_vars[,"SIFT"]))==0 & nchar(as.character(end_vars[,"POLYPHEN"]))==0))	
+					}
+				
+				#STORE ALL SAMPLES LEFT IN THE SET OF VARIANTS
+				samples = unique(unlist(strsplit(gsub(" ","",paste(as.character(end_vars[,"SAMPLES"]),collapse=",")),",")))
+				
+
+				#IF THE N. OF GENES LEFT IN THE SET IS EQUAL OR HIGHER THAN THE N. OF GENES TO BE CONSIDERED FOR THE ANALYSIS, FILTER ON THAT
+				if(length(unique(end_vars[,"GENE"]))>=as.numeric(n_of_genes)){
+					s_to_count = c()
+					
+					if(specific_n_genes == F){		#IF WE WANT TO CHECK ALL VARIATION OR VARIATION FROM A CERTAIN N OF GENES UPWARDS
+						if(n_of_genes == 1){		#ALL VARIATION
+							s_to_count = samples
+							}
+						else{				#FROM 2,3,etc GENES UPWARDS
+							for(s in samples){
+								if(length(as.character(unique(end_vars[as.logical(grepl(s,end_vars[,"SAMPLES"])),"GENE"])))>=as.numeric(n_of_genes)){
+									s_to_count = c(s_to_count,s)
+									}
+								}
+							}
+						}
+					else{					#IF WE WANT TO CHECK VARIATION IN A PRECISE N OF GENES
+						for(s in samples){
+							if(length(as.character(unique(end_vars[as.logical(grepl(s,end_vars[,"SAMPLES"])),"GENE"])))==as.numeric(n_of_genes)){
+								s_to_count = c(s_to_count,s)
+								}
+							}
+						}
+
+					n_carr = c()
+					tokeep_by_reg = rep(F,dim(end_vars)[1])
+					for(ev in 1:dim(end_vars)[1]){
+						end_vars[ev,"SAMPLES"] = paste(subset(gsub(" ","",unlist(strsplit(as.character(end_vars[ev,"SAMPLES"]),","))),gsub(" ","",unlist(strsplit(as.character(end_vars[ev,"SAMPLES"]),","))) %in% s_to_count),collapse=",")
+						end_vars[ev,"NO.SAMPLES"] = length(unlist(strsplit(end_vars[ev,"SAMPLES"],",")))
+						
+						if((regions == 2 && length(genes)>1) | (regions == 3 && length(genes)>1)){						
+							if(regions==2){
+								reg = c("splice_donor_variant","splice_acceptor_variant","frameshift_variant","stop_gained","stop_lost")
+								}
+							else{
+								reg = c("missense_variant","inframe_insertion","inframe_deletion")
+								}
+							for(ire in reg){
+								if(grepl(ire,as.character(end_vars[ev,"VAR.CLASS"]))){
+									tokeep_by_reg[ev] = T
+									}
+								}
+							}
+						else{
+							tokeep_by_reg[ev]=T
+							}
+						
+						if(end_vars[ev,"NO.SAMPLES"]==0){
+							n_carr = c(n_carr,ev)
+							}
+						}
+					tokeep_by_reg = which(tokeep_by_reg==F)
+						
+					if(length(c(n_carr,tokeep_by_reg))>0){
+						end_vars = end_vars[-c(unique(c(n_carr,tokeep_by_reg))),]
+						}
+
+					n_of_samples = length(unique(unlist(strsplit(gsub(" ","",paste(as.character(end_vars[,"SAMPLES"]),collapse=",")),","))))
+					}
+				
+				else{
+					n_of_samples = 0
+					}
+		
+				if(length(genes) <= 5){
+					file_name = paste(sp,thres[u],"_",paste(genes,collapse="_"),coh_flag,var_label,n_of_genes_label,ethn_flag,shrd_flag,".txt",sep="")
+					}
+				else{
+					file_name = paste(sp,thres[u],"_",length(genes),"genes",coh_flag,var_label,n_of_genes_label,ethn_flag,shrd_flag,".txt",sep="")
+					}
+
+				if(casecontrol == 0){
+					write.table(end_vars,paste("./Results/",file_name,sep=""),sep="\t",row.names=F,quote=F)
+					}
+				else{
+					cat("\n",file=paste("./Results/",file_name,sep=""),append=T)
+					write.table(end_vars,paste("./Results/",file_name,sep=""),sep="\t",col.names=F,row.names=F,quote=F,append=T)
+					}
+				}
+	
+			else{
+				n_of_samples = 0
+				}
+
+			#SET DENOMINATOR ACCORDING TO THE CHOSEN COHORT TO ANALYZE
+			if(coh == 1){
+				den = 234
+				}
+			else if(coh == 2){
+				den = 98
+				}
+			else{
+				den = 332
+				}
+		
+			counts[u,casecontrol+1] = n_of_samples
+
+			if(casecontrol == 1){		
+				mat = matrix(c(counts[u,1],den-counts[u,1],counts[u,2],319-counts[u,2]),ncol=2)
+				ft = fisher.test(mat,alternative="g")$p.value
+#				ft = fisher.test(mat)$p.value
+				lr = ((counts[u,1]/den)-(counts[u,2]/319))/(counts[u,1]/den)
+				eb = ((counts[u,1]/den)-(counts[u,2]/319))*100
+				cat(paste("FREQUENCY RANGE IN POPULATION (%): ",thres[u],"\nBurden in cases: ",counts[u,1],"/",den," (",(counts[u,1]/den)*100,"%)","\nBurden in controls: ",counts[u,2],"/",319," (",(counts[u,2]/319)*100,"%)","\np-value for one-tailed Fisher exact test: ",ft,"\nLikelihood ratio: ",lr,"\nExcess burden in disease (%):",eb,"\n\n\n",sep=""))
+				}
+			}
+		casecontrol = casecontrol + 1
+		}
+
+	if(zero_vars == T){
+		for(u in 1:length(thres)){
+			if(coh == 1){
+				den = 234
+				}
+			else if(coh == 2){
+				den = 98
+				}
+			else{
+				den = 332
+				}
+			mat = matrix(c(counts[u,1],den-counts[u,1],counts[u,2],319-counts[u,2]),ncol=2)
+			ft = fisher.test(mat,alternative="g")$p.value
+#			ft = fisher.test(mat)$p.value
+			lr = ((counts[u,1]/den)-(counts[u,2]/319))/(counts[u,1]/den)
+			eb = ((counts[u,1]/den)-(counts[u,2]/319))*100
+			cat(paste("FREQUENCY RANGE IN POPULATION (%): ",thres[u],"\nBurden in cases: ",counts[u,1],"/",den,"\nBurden in controls: ",counts[u,2],"/",319,"\np-value for one-tailed Fisher exact test: ",ft,"\nLikelihood ratio: ",lr,"\nExcess burden in disease (%):",eb,"\n\n\n",sep=""))
+			}
+		}	
+
+
+		
+#####ANALYSIS OF DOUBLE GENE HITS#####
+	if(n_of_genes >= 2){
+		double_hits_analysis = readline("\nWould you like to analyze the occurrence of multiple hits (gene pairs)? (type 'y' or 'n')\n")
+		if(double_hits_analysis == "y" | double_hits_analysis == "Y"){
+			mh_vars = read.table(paste("./Results/",file_name,sep=""),header=T,sep="\t",blank.lines.skip=F)
+			cases = mh_vars[1:which(is.na(mh_vars[,2]))-1,]
+			controls = mh_vars[(which(is.na(mh_vars[,2]))+1):dim(mh_vars)[1],]
+	
+			heat_map = matrix(nrow=length(genes),ncol=length(genes))
+			heatmap_excess = matrix(nrow=length(genes),ncol=length(genes))
+			colnames(heat_map) = genes
+			rownames(heat_map) = genes
+			colnames(heatmap_excess) = genes
+			rownames(heatmap_excess) = genes			
+			
+			mh_bygene = c()
+			mh = 0
+			while(mh %in% 0:1){
+				if(mh == 0){
+					mh_vars = cases
+					}
+				else if (mh == 1){
+					mh_vars = controls
+					}
+				samples = unique(unlist(strsplit(gsub(" ","",paste(as.character(mh_vars[,"SAMPLES"]),collapse=",")),",")))
+		
+				gene_col = c()
+				keep = c()
+				for(smp in samples){
+					gns = paste(as.character(unique(mh_vars[which(grepl(smp,mh_vars[,"SAMPLES"])),"GENE"])),collapse=",")
+					if(length(unlist(strsplit(gns,",")))>1){
+						keep[which(samples==smp)] = T
+						}
+					else{
+						keep[which(samples==smp)] = F
+						}
+					gene_col = c(gene_col,gns)
+					}
+				raw_table = cbind(samples,gene_col)
+				raw_table = raw_table[as.logical(keep),]
+		
+				
+				N_OF_SAMPLES = c()	
+				GENE = c()
+				GENE1_GENE2 = c()
+				EXCESSBURDEN_DISEASE = c()						
+				gene1_tracker = c()
+				gene2_tracker = c()		
+				
+				for(gene1 in genes){
+					
+					gene1_tracker = c(gene1_tracker,gene1)
+					
+					n_of_samples = length(which(grepl(gene1,raw_table[,"gene_col"])))
+					GENE = c(GENE,paste(gene1,"+x",sep=""))
+					N_OF_SAMPLES = c(N_OF_SAMPLES,n_of_samples)
+					
+					for(gene2 in genes){
+						
+						if(gene1 == gene2){
+							
+							next
+							
+							}
+
+						else{
+							
+							if(gene1 %in% gene2_tracker & gene2 %in% gene1_tracker){
+								
+								next
+								
+								}
+							
+							else{	
+								
+								if(mh == 0){
+									
+									heat_map[gene1,gene2] = 0
+									
+									}
+								
+								else if(mh == 1){
+									
+									heat_map[gene2,gene1] = 0
+									
+									}
+								
+								gene2_tracker = c(gene2_tracker,gene2)				
+								
+								ourgene_pairs = subset(raw_table,(grepl(gene1,raw_table[,"gene_col"]) & grepl(gene2,raw_table[,"gene_col"])))
+								
+								if(dim(ourgene_pairs)[1]>0){
+									
+									for(ln in 1:dim(ourgene_pairs)[1]){
+										
+										if(grepl(gene1,ourgene_pairs[ln,"gene_col"]) & grepl(gene2,ourgene_pairs[ln,"gene_col"])){	
+											
+											if(mh == 0){
+												
+												heat_map[gene1,gene2] = heat_map[gene1,gene2] + ((1/(length(unlist(strsplit(ourgene_pairs[ln,"gene_col"],",")))-1))/4.85)
+												
+												}
+											
+											else if(mh == 1){
+												
+												heat_map[gene2,gene1] = heat_map[gene2,gene1] + ((1/(length(unlist(strsplit(ourgene_pairs[ln,"gene_col"],",")))-1))/4.04)
+												
+												}
+											
+											}							
+										
+										}
+									
+									}
+								
+								}
+							
+							}
+
+						if(mh == 1){
+							GENE1_GENE2 = c(GENE1_GENE2,paste(gene1,"+",gene2,sep=""))   
+							EXCESSBURDEN_DISEASE = c(EXCESSBURDEN_DISEASE,heat_map[gene1,gene2]-heat_map[gene2,gene1])
+							
+							heatmap_excess[gene1,gene2] = tail(EXCESSBURDEN_DISEASE,1)
+							}						
+						}
+					
+					}
+		
+				mh_overview = cbind(GENE,N_OF_SAMPLES)
+				mh_overview = mh_overview[order(-as.integer(mh_overview[,"N_OF_SAMPLES"])),]
+		
+				if(mh == 0){
+					cat("\n\nOVERVIEW OF MULTIPLE HITS IN CASES:\n")
+					}
+				else if(mh == 1){
+					cat("\n\nOVERVIEW OF MULTIPLE HITS IN CONTROLS:\n")
+					}
+				mh_bygene = cbind(mh_bygene,mh_overview)
+				print(sort(table(raw_table[,"gene_col"]),decreasing=T))
+				mh = mh + 1
+				}
+			
+			colnames(mh_bygene) = c("GENE","N_OF_SAMPLES_DCM","GENE","N_OF_SAMPLES_HVOL")
+			mh_bygene_filename = paste("./Results/mh_bygene_",thres,".txt",sep="")
+			write.table(mh_bygene,mh_bygene_filename,sep="\t",quote=F)
+
+			excess_table = cbind(GENE1_GENE2,EXCESSBURDEN_DISEASE)
+			excess_table = excess_table[order(-as.numeric(excess_table[,"EXCESSBURDEN_DISEASE"])),]
+			print(excess_table)
+			
+			library(gplots)
+			hm_filename = paste("./Results/heatmap_",thres,".pdf",sep="")
+			pdf(hm_filename)	
+			heatmap.2(heat_map,Rowv=F,Colv=F,dendrogram='none',col=rev(heat.colors(256)),na.color="black",trace='none',xlab="HVOLs",ylab="DCM",main="Heatmap of pairwise gene association for rare variants")
+			dev.off()
+			
+			hm_xs_filename = paste("./Results/heatmap_excess_",thres,".pdf",sep="")
+			pdf(hm_xs_filename)
+			heatmap.2(heatmap_excess,Rowv=F,Colv=F,dendrogram='none',col=rev(heat.colors(256)),na.color="gray77",trace='none')
+			dev.off()
+			}
+		}
+	}
+
+
+
+

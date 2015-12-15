@@ -1,0 +1,432 @@
+###Inputs required: candidate variants VCF file, R vector with candidate gene names, table with RVIS scores from Petrovski et al, 
+###table with constraint Z score from Samocha et al, table with probability of being a recessive disease gene by McArthur et al 2012, 
+###table with probabilities of haploinsufficiency from Huang et al, table of essential/non essential genes in mice by Georgi et al.
+
+
+prioritization_ranking <- function(vcf,genes,rvis,samocha,rec,hi,ess){
+
+	model = readline("Choose the mode of inheritance you are considering:\n1=recessive\n2=denovo\n3=compound het\n")
+
+	library("org.Hs.eg.db")
+	dbCon = org.Hs.eg_dbconn()
+	sqlQuery <- "SELECT * FROM alias, gene_info WHERE alias._id == gene_info._id;"
+	all_gene_names = dbGetQuery(dbCon, sqlQuery)
+
+	rvis[,1] = as.character(rvis[,1])
+	hi[,4] = as.character(hi[,4])
+	rec[,1] = as.character(rec[,1])	
+	ess[,1] = as.character(ess[,1])
+	ess[,6] = as.character(ess[,6])
+	ess[,6] = gsub("Y",1,ess[,6])
+	ess[,6] = gsub("N",0,ess[,6])
+
+	hi_genes = sapply(hi[,4], function(x)  unlist(strsplit(as.character(x),"\\|"))[1])
+	hi_prob = as.numeric(sapply(hi[,4], function(x)  unlist(strsplit(as.character(x),"\\|"))[2]))
+
+	fam_score=c()
+	pred_score=c()
+	rvis_pc=c()
+	hvol_score=c()
+	phastcons=c()
+	gerp=c()
+	hvol_homalt=c()
+	avgdepth=c()
+	p_rec = c()
+	p_hi = c()
+	sam_score = c()
+	essential = c()
+	call_rate = c()
+	mean_readdepth = c()
+	gencalls_family = c()
+	mgi_phenotype = c()	
+
+	genealiasnames=c()
+
+	for(x in 1:dim(vcf)[1]){		
+
+		fs=0
+		ps=0
+		hs=0
+		hn=0
+		tr=0
+#GENOTYPES (+1 for each genotype consistent with the model, -1 for each inconsistency)
+
+		if(model == 1){
+			if(grepl(",",as.character(vcf[x,"ALT"]))){
+				fs = NA
+				}
+			else{
+				if(substr(as.character(vcf[x,"X20HE00418"]),1,3)=="1/1"){
+					fs=fs-1
+					}
+				else if(substr(as.character(vcf[x,"X20HE00418"]),1,3)=="0/1"){
+					fs=fs+1
+					}
+				else if(substr(as.character(vcf[x,"X20HE00418"]),1,3)=="0/0"){
+					fs=fs-1
+					}
+
+				if(substr(as.character(vcf[x,"X20IB00419"]),1,3)=="1/1"){
+					fs=fs-1
+					}
+				else if(substr(as.character(vcf[x,"X20IB00419"]),1,3)=="0/1"){
+					fs=fs+1
+					}
+				else if(substr(as.character(vcf[x,"X20IB00419"]),1,3)=="0/0"){
+					fs=fs-1
+					}
+				
+				if(substr(as.character(vcf[x,"X20MA00417"]),1,3)=="1/1"){
+					fs=fs+1
+					}
+				else if(substr(as.character(vcf[x,"X20MA00417"]),1,3)=="0/1"){
+					fs=fs-1
+					}
+				else if(substr(as.character(vcf[x,"X20MA00417"]),1,3)=="0/0"){
+					fs=fs-1
+					}
+	
+				if(substr(as.character(vcf[x,"X20MO00420"]),1,3)=="1/1"){
+					fs=fs-1
+					}
+				else if(substr(as.character(vcf[x,"X20MO00420"]),1,3)=="0/1" | substr(as.character(vcf[x,"X20MO00420"]),1,3)=="0/0"){
+					fs=fs+1
+					}
+				
+				if(substr(as.character(vcf[x,"X20SO00421"]),1,3)=="1/1"){
+					fs=fs-1
+					}
+				else if(substr(as.character(vcf[x,"X20SO00421"]),1,3)=="0/1" | substr(as.character(vcf[x,"X20SO00421"]),1,3)=="0/0"){
+					fs=fs+1
+					}
+				}
+			}
+	
+		else if(model == 2){
+
+			if(grepl(",",as.character(vcf[x,"ALT"]))){
+				fs = NA
+				}
+			else{
+				if(substr(as.character(vcf[x,"X20HE00418"]),1,3)!="./."){
+					if(substr(as.character(vcf[x,"X20HE00418"]),1,3)=="0/0"){
+						fs=fs+1
+						}
+					else{
+						fs=fs-1
+						}
+					}
+
+				if(substr(as.character(vcf[x,"X20IB00419"]),1,3)!="./."){
+					if(substr(as.character(vcf[x,"X20IB00419"]),1,3)=="0/0"){
+						fs=fs+1
+						}
+					else{
+						fs=fs-1
+						}
+					}
+				
+				if(substr(as.character(vcf[x,"X20MA00417"]),1,3)!="./."){
+					if(substr(as.character(vcf[x,"X20MA00417"]),1,3)=="0/1"){
+						fs=fs+1
+						}
+					else{
+						fs=fs-1
+						}
+					}
+	
+				if(substr(as.character(vcf[x,"X20MO00420"]),1,3)!="./."){
+					if(substr(as.character(vcf[x,"X20MO00420"]),1,3)=="0/0"){
+						fs=fs+1
+						}
+					else{
+						fs=fs-1
+						}
+					}
+				
+				if(substr(as.character(vcf[x,"X20SO00421"]),1,3)!="./."){
+					if(substr(as.character(vcf[x,"X20SO00421"]),1,3)=="0/0"){
+						fs=fs+1
+						}
+					else{
+						fs=fs-1
+						}
+					}
+				}
+			}
+
+		fam_score=c(fam_score,fs)
+		
+#PREDICTIONS (1 if at least one predictor scored the variant as damaging/deleterious)
+
+		if(grepl("dbNSFP_Polyphen2_HDIV_pred",as.character(vcf[x,"INFO"]))){
+			pred = unlist(strsplit(subset(unlist(strsplit(as.character(vcf[x,"INFO"]),";")),grepl("dbNSFP_Polyphen2_HDIV_pred",unlist(strsplit(as.character(vcf[x,"INFO"]),";")))),"="))[2]
+			pred = unlist(strsplit(pred,","))
+			pred = unique(subset(pred,(pred=="B" | pred=="P" | pred=="D")))
+			if("D" %in% pred){
+				ps = 1
+				}
+			}
+
+
+		if(grepl("dbNSFP_LRT_pred",as.character(vcf[x,"INFO"]))){
+			pred = unlist(strsplit(subset(unlist(strsplit(as.character(vcf[x,"INFO"]),";")),grepl("dbNSFP_LRT_pred",unlist(strsplit(as.character(vcf[x,"INFO"]),";")))),"="))[2]
+			pred = unlist(strsplit(pred,","))
+			pred = unique(subset(pred,(pred=="N" | pred=="U" | pred=="D")))
+			if("D" %in% pred){
+				ps = 1
+				}
+			}
+		
+
+		if(grepl("dbNSFP_SIFT_pred",as.character(vcf[x,"INFO"]))){
+			pred = unlist(strsplit(subset(unlist(strsplit(as.character(vcf[x,"INFO"]),";")),grepl("dbNSFP_SIFT_pred",unlist(strsplit(as.character(vcf[x,"INFO"]),";")))),"="))[2]
+			pred = unlist(strsplit(pred,","))
+			pred = unique(subset(pred,(pred=="D" | pred=="T")))
+			if("D" %in% pred){
+				ps = 1
+				}
+			}
+
+		if(grepl("dbNSFP_MutationTaster_pred",as.character(vcf[x,"INFO"]))){
+			pred = unlist(strsplit(subset(unlist(strsplit(as.character(vcf[x,"INFO"]),";")),grepl("dbNSFP_MutationTaster_pred",unlist(strsplit(as.character(vcf[x,"INFO"]),";")))),"="))[2]
+			pred = unlist(strsplit(pred,","))
+			pred = unique(subset(pred,(pred=="P" | pred=="D" | pred=="N" | pred=="A")))
+			if("A" %in% pred | "D" %in% pred){
+				ps = 1
+				}
+			}
+		pred_score=c(pred_score,ps)
+		
+#CONSERVATION
+		
+		if(grepl("dbNSFP_phastCons100way_vertebrate",as.character(vcf[x,"INFO"]))){
+			phc = unlist(strsplit(subset(unlist(strsplit(as.character(vcf[x,"INFO"]),";")),grepl("dbNSFP_phastCons100way_vertebrate",unlist(strsplit(as.character(vcf[x,"INFO"]),";")))),"="))[2]
+			}
+		else{
+			phc=NA
+			}
+		phastcons=c(phastcons,phc)
+
+		if(grepl("dbNSFP_GERP\\+\\+_RS",as.character(vcf[x,"INFO"]))){
+			grp = unlist(strsplit(subset(unlist(strsplit(as.character(vcf[x,"INFO"]),";")),grepl("dbNSFP_GERP\\+\\+_RS",unlist(strsplit(as.character(vcf[x,"INFO"]),";")))),"="))[2]
+			}
+		else{
+			grp=NA
+			}
+		gerp=c(gerp,grp)
+	
+
+#RVIS PERCENTILE
+	
+		if(length(which(rvis[,1]==genes[x]))==1){
+			rvis_pc = c(rvis_pc,rvis[which(rvis[,1]==genes[x]),3])
+			}
+		else{
+			gene_aliases = as.character(all_gene_names[which(all_gene_names[,5]==genes[x]),2])
+			for(g in 1:length(gene_aliases)){
+				if(length(which(rvis[,1]==gene_aliases[g]))==1){
+					rvis_pc = c(rvis_pc,rvis[which(rvis[,1]==gene_aliases[g]),3])
+					break
+					}
+				else{
+					if(g == length(gene_aliases)){
+						rvis_pc = c(rvis_pc,NA)
+						}
+					else{
+						next
+						}
+					}
+				}
+			}
+
+#PROBABILITY OF HAPLOINSUFFICIENCY
+		
+		if(length(which(hi_genes==genes[x]))==1){
+			p_hi = c(p_hi,hi_prob[which(hi_genes==genes[x])])
+			}
+		else{
+			gene_aliases = as.character(all_gene_names[which(all_gene_names[,5]==genes[x]),2])
+			for(g in 1:length(gene_aliases)){
+				if(length(which(hi_genes==gene_aliases[g]))==1){
+					p_hi = c(p_hi,hi_prob[which(hi_genes==gene_aliases[g])])
+					break
+					}
+				else{
+					if(g == length(gene_aliases)){
+						p_hi = c(p_hi,NA)
+						}
+					else{
+						next
+						}
+					}
+				}
+			}
+
+#PROBABILITY OF CAUSING RECESSIVE DISEASE
+
+		if(length(which(rec[,1]==genes[x]))==1){
+			p_rec = c(p_rec,rec[which(rec[,1]==genes[x]),2])
+			}
+		else{
+			gene_aliases = as.character(all_gene_names[which(all_gene_names[,5]==genes[x]),2])
+			for(g in 1:length(gene_aliases)){
+				if(length(which(rec[,1]==gene_aliases[g]))==1){
+					p_rec = c(p_rec,rec[which(rec[,1]==gene_aliases[g]),2])
+					break
+					}
+				else{
+					if(g == length(gene_aliases)){
+						p_rec = c(p_rec,NA)
+						}
+					else{
+						next
+						}
+					}
+				}
+			}
+		
+
+#SAMOCHA CONSTRAINT SCORE
+
+		if(length(which(samocha[,1]==genes[x]))==1){
+			sam_score = c(sam_score,samocha[which(samocha[,1]==genes[x]),2])
+			}
+		else{
+			gene_aliases = as.character(all_gene_names[which(all_gene_names[,5]==genes[x]),2])
+			for(g in 1:length(gene_aliases)){
+				if(length(which(samocha[,1]==gene_aliases[g]))==1){
+					sam_score = c(sam_score,samocha[which(samocha[,1]==gene_aliases[g]),2])
+					break
+					}
+				else{
+					if(g == length(gene_aliases)){
+						sam_score = c(sam_score,NA)
+						}
+					else{
+						next
+						}
+					}
+				}
+			}
+
+#ESSENTIAL GENE
+		
+		if(length(which(ess[,1]==genes[x]))==1){
+			essential = c(essential,ess[which(ess[,1]==genes[x]),6])
+			}
+		else{
+			gene_aliases = as.character(all_gene_names[which(all_gene_names[,5]==genes[x]),2])
+			for(g in 1:length(gene_aliases)){
+				if(length(which(ess[,1]==gene_aliases[g]))==1){
+					essential = c(essential,ess[which(ess[,1]==gene_aliases[g]),6])
+					break
+					}
+				else{
+					if(g == length(gene_aliases)){
+						essential = c(essential,NA)
+						}
+					else{
+						next
+						}
+					}
+				}
+			}
+		
+#HVOLS GENOTYPES
+		if(model==1){
+			if(grepl(",",as.character(vcf[x,"ALT"]))){
+				hn = NA
+				}
+			else{
+				for(y in 10:523){
+					if(substr(as.character(vcf[x,y]),1,3)=="1/1"){
+						hn=hn+1
+						}
+					}		
+				}
+			hvol_homalt=c(hvol_homalt,hn)
+			}
+		else if(model==2){
+			if(grepl(",",as.character(vcf[x,"ALT"]))){
+				hn = NA
+				}
+			else{
+				for(y in 10:523){
+					if(substr(as.character(vcf[x,y]),1,3)=="1/1"){
+						hn=hn+2
+						}
+					else if(substr(as.character(vcf[x,y]),1,3)=="0/1"){
+						hn=hn+1
+						}
+					}
+				}
+			hvol_homalt = c(hvol_homalt,hn)
+			hvol_varalleles = hvol_homalt
+			}
+		
+
+#CALL RATE	
+		readdepth = 0
+		cr = 0
+		gc_f = 0
+		rd_count = 0
+		for(y in 10:528){
+			if(substr(as.character(vcf[x,y]),1,3)!="./."){
+				cr = cr+1
+				refreads=unlist(strsplit(unlist(strsplit(as.character(vcf[x,y]),":"))[2],","))[1]
+				varreads=unlist(strsplit(unlist(strsplit(as.character(vcf[x,y]),":"))[2],","))[2]
+				if(refreads!="." & !(is.na(refreads)) & varreads!="." & !(is.na(varreads))){
+					rd_count = rd_count+1
+					readdepth = readdepth+as.numeric(refreads)+as.numeric(varreads)
+					}
+				}
+#CALL COUNT IN FAMILY
+			if(y>=524){
+				if(substr(as.character(vcf[x,y]),1,3)!="./."){
+					gc_f = gc_f+1
+					}
+				}
+			}
+			mean_readdepth = c(mean_readdepth,readdepth/rd_count)
+			call_rate = c(call_rate,cr/519)
+			gencalls_family = c(gencalls_family,gc_f)
+
+#MGI PHENOTYPE
+		awk_command = paste("awk -F \"\\t\" \'$1==\"",genes[x],"\" {print $37}\' dbNSFP2.8_gene",sep="")		
+		
+		if(length(system(awk_command,intern=T)==1)){
+			mgi_phenotype = c(mgi_phenotype,system(awk_command,intern=T))
+			}
+		else{
+			gene_aliases = as.character(all_gene_names[which(all_gene_names[,5]==genes[x]),2])
+			for(g in 1:length(gene_aliases)){
+				awk_command = paste("awk -F \"\\t\" \'$1==\"",gene_aliases[g],"\" {print $37}\' dbNSFP2.8_gene",sep="")
+				if(length(system(awk_command,intern=T))==1){
+					mgi_phenotype = c(mgi_phenotype,system(awk_command,intern=T))
+					break
+					}
+				else{
+					if(g == length(gene_aliases)){
+						mgi_phenotype = c(mgi_phenotype,"")
+						}
+					else{
+						next
+						}
+					}
+				}
+			}
+
+		}
+
+	if(model==1){
+		a=cbind(genes,fam_score,gencalls_family,call_rate,mean_readdepth,hvol_homalt,pred_score,phastcons,gerp,rvis_pc,sam_score,p_hi,p_rec,essential,mgi_phenotype)
+		}
+	else if(model==2){
+		a=cbind(genes,fam_score,gencalls_family,call_rate,mean_readdepth,hvol_varalleles,pred_score,phastcons,gerp,rvis_pc,sam_score,p_hi,p_rec,essential,mgi_phenotype)
+		}
+	write.table(a,"provafinal2.txt",col.names=T,row.names=F,sep="\t",quote=F)
+	}
+
+		
+	
